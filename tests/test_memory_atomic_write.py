@@ -9,6 +9,7 @@ in the window costs the day, not the turn.
 from __future__ import annotations
 
 import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,6 +72,29 @@ def test_unicode_survives_the_round_trip(tmp_path: Path):
     target = tmp_path / "note.md"
     atomic_write_text(target, "§ tiếng Việt 中文 🎯")
     assert target.read_text(encoding="utf-8") == "§ tiếng Việt 中文 🎯"
+
+
+def test_existing_permissions_survive_a_rewrite(tmp_path: Path):
+    """mkstemp defaults to 0600; a routine rewrite must not silently apply that.
+
+    A file the user made group- or world-readable must stay that way after
+    the next write, not get quietly locked down to owner-only.
+    """
+    target = tmp_path / "note.md"
+    target.write_text("original", encoding="utf-8")
+    os.chmod(target, 0o644)
+
+    atomic_write_text(target, "rewritten")
+
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o644
+    assert target.read_text(encoding="utf-8") == "rewritten"
+
+
+def test_new_file_gets_the_safe_default_mode(tmp_path: Path):
+    """No prior file means nothing to preserve -- mkstemp's 0600 default stands."""
+    target = tmp_path / "note.md"
+    atomic_write_text(target, "content")
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
 
 
 # -- turn capture uses it -------------------------------------------------

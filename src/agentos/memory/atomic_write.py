@@ -14,6 +14,7 @@ file or the new one, never a truncated one.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -47,6 +48,12 @@ def atomic_write_text(target: Path, content: str, *, encoding: str = "utf-8") ->
     The temporary file is created in the target's own directory, because
     ``os.replace`` is only atomic within a single filesystem. On failure the
     temporary file is removed and the original is left exactly as it was.
+
+    ``mkstemp`` creates the temporary file mode 0600 regardless of the
+    target's own permissions, and it is that temp file's mode which ends up
+    on disk after the rename. If *target* already exists, its current mode
+    is copied onto the temp file first so a routine rewrite cannot silently
+    tighten a file's permissions.
     """
     encoded = content.encode(encoding)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -60,6 +67,15 @@ def atomic_write_text(target: Path, content: str, *, encoding: str = "utf-8") ->
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
+        try:
+            existing_mode = stat.S_IMODE(os.stat(target).st_mode)
+        except OSError:
+            existing_mode = None
+        if existing_mode is not None:
+            try:
+                os.chmod(tmp_name, existing_mode)
+            except OSError:
+                pass
         os.replace(tmp_name, target)
     except BaseException:
         try:
