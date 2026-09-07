@@ -2100,6 +2100,33 @@ class TestSessionsCompact:
 
 class TestSessionsTruncate:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_max_messages",
+        [
+            True,  # bool is an int subclass: would silently become 1 (keep only newest)
+            False,  # would silently become 0 (recent = []): wipes the whole transcript
+            "20",  # non-int: previously reached manager.truncate()'s `< 0` check and
+            # raised an unhandled TypeError, leaking as INTERNAL_ERROR
+            -1,
+            2.5,
+        ],
+    )
+    async def test_truncate_rejects_invalid_max_messages(
+        self, dispatcher, ctx_with_sessions, session, bad_max_messages
+    ):
+        res = await dispatcher.dispatch(
+            "r1",
+            "sessions.truncate",
+            {"key": session.session_key, "maxMessages": bad_max_messages},
+            ctx_with_sessions,
+        )
+
+        assert res.ok is False
+        assert res.error.code == "INVALID_REQUEST"
+        # The destructive truncate must never be attempted with a bad param.
+        assert ctx_with_sessions.session_manager.truncate_calls == []
+
+    @pytest.mark.asyncio
     async def test_truncate_valid_preserves_hard_truncate_semantics(
         self, dispatcher, ctx_with_sessions, session
     ):
