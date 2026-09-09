@@ -69,10 +69,24 @@ from agentos.memory.redaction import redact_memory_text
             'eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature", "other": 1}',
             '{"Authorization": "Bearer ***", "other": 1}',
         ),
-        # Field names that shouldn't be redacted
+                # Field names that shouldn't be redacted
         ("sellToken: 123", "sellToken: 123"),
         ("token_count = 5", "token_count = 5"),
         ("my_token_count = 10", "my_token_count = 10"),
+        # snake_case credential names: the keyword is glued to its qualifier
+        # by an underscore, which is a word character, so a plain \b does
+        # not fire there. Opaque values (no vendor-recognisable shape) that
+        # would otherwise reach memory completely unmasked.
+        ("reset_token: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b", "reset_token: [REDACTED]"),
+        ("csrf_token: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b", "csrf_token: [REDACTED]"),
+        ("device_token: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b", "device_token: [REDACTED]"),
+        # camelCase stays excluded on purpose: "resetToken" is syntactically
+        # identical to "sellToken" above, and there is no boundary- or
+        # shape-based way to tell them apart.
+        (
+            "resetToken: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b",
+            "resetToken: 8f3a91c2b6d04e7f9a1b5c3d7e2f4a6b",
+        ),
         # PEM Private Keys
         (
             "Before\n"
