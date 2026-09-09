@@ -76,7 +76,26 @@ _TEXT_PROTOCOL_PREFIXES = (
     "<summary",
     "<angle brackets",
 )
+
 _MAX_TEXT_PROTOCOL_PREFIX_LEN = max(len(prefix) for prefix in _TEXT_PROTOCOL_PREFIXES)
+
+
+def contains_invoke_protocol_markup(text: str) -> bool:
+    """Return True when text contains a complete ``<invoke>``-shaped tool call.
+
+    Shared with ``provider.minimax_compat`` so the two subsystems that must
+    agree on "is this text a text-encoded tool call" -- this leak-suppression
+    path and the actual tool-call extractor -- read from one definition
+    instead of drifting into two independently hand-kept ones. That drift is
+    exactly what happened before: this module already recognized bare
+    ``<invoke name="...">`` blocks (any wrapper spelling, including the
+    ``tvoe_calls`` typo variant and DSML's pipe-prefixed tags) as leaked
+    protocol to hide from the user, while the extractor only recognized the
+    literal ``<minimax:tool_call>`` wrapper -- so every other shape this
+    function already matched was hidden from the user AND silently never
+    executed as a real tool call.
+    """
+    return bool(_TEXT_PROTOCOL_INVOKE_RE.search(text) and _TEXT_PROTOCOL_CLOSE_RE.search(text))
 
 
 def _find_trailing_tool_call_start(text: str, tool_name: str) -> int | None:
