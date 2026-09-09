@@ -17,13 +17,13 @@ if TYPE_CHECKING:
 import httpx
 import structlog
 
+from agentos.engine.tool_text_compat import parse_text_tool_invocations
 from agentos.env import trust_env as _trust_env
 from agentos.execution_status import compact_provider_status, derive_is_error
 from agentos.secrets import clean_header_secret
 
 from .context_capabilities import supports_openrouter_explicit_prompt_cache
 from .error_body import read_bounded_body, summarize_error_body
-from .minimax_compat import contains_minimax_protocol, parse_minimax_tool_calls
 from .openrouter_attribution import openrouter_app_headers
 from .protocol import ProviderConnectionConfig, ProviderMetadata
 from .reasoning import ThinkTagStreamSplitter
@@ -425,27 +425,34 @@ def _synthesize_text_tool_events(
 
     events: list[ToolUseStartEvent | ToolUseEndEvent] = []
     allowed_tool_names = {tool.name for tool in tools}
-    if contains_minimax_protocol(full_text):
-        for minimax_call in parse_minimax_tool_calls(full_text):
-            if minimax_call.name not in allowed_tool_names:
-                continue
-            tool_use_id = f"minimax_compat_{uuid4().hex[:12]}"
-            events.append(
-                ToolUseStartEvent(
-                    tool_use_id=tool_use_id,
-                    tool_name=minimax_call.name,
-                    synthetic_from_text=True,
-                )
+    # Recognition lives in engine.tool_text_compat, alongside the leak
+    # suppressor that hides this same markup: a variant only one of them knows
+    # is either shown to the user or silently never executed (#1514).
+    invocations = parse_text_tool_invocations(full_text)
+    for invocation in invocations:
+        if invocation.name not in allowed_tool_names:
+            continue
+        tool_use_id = f"text_protocol_{uuid4().hex[:12]}"
+        events.append(
+            ToolUseStartEvent(
+                tool_use_id=tool_use_id,
+                tool_name=invocation.name,
+                synthetic_from_text=True,
             )
-            events.append(
-                ToolUseEndEvent(
-                    tool_use_id=tool_use_id,
-                    tool_name=minimax_call.name,
-                    arguments=dict(minimax_call.arguments),
-                    synthetic_from_text=True,
-                )
+        )
+        events.append(
+            ToolUseEndEvent(
+                tool_use_id=tool_use_id,
+                tool_name=invocation.name,
+                arguments=dict(invocation.arguments),
+                synthetic_from_text=True,
             )
-    else:
+        )
+    # The plain-JSON fallback keys on whether markup was found at all, not on
+    # whether it produced an allowed call: text carrying a well-formed invoke
+    # for a tool this turn did not offer is still protocol, not a bare JSON
+    # tool call, and must not be re-parsed as one.
+    if not invocations:
         plain_call = _parse_plain_json_tool_call(full_text)
         if plain_call is not None:
             tool_name, arguments = plain_call

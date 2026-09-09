@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
+from typing import Any
 
 _PLAIN_JSON_TOOL_CALL_RE = re.compile(
     r"^\s*([A-Za-z_][A-Za-z0-9_.:-]*)\s*(\{.*\})\s*$",
@@ -12,6 +14,28 @@ _PLAIN_JSON_TOOL_CALL_RE = re.compile(
 _PLAIN_JSON_TOOL_PREFIX_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_.:-]*)\s*(?=\{)",
 )
+# --- shared text-tool-protocol vocabulary ---------------------------------
+#
+# One inventory, used for BOTH jobs: hiding protocol markup from the user and
+# executing the calls encoded in it. Issue #1514 was a drift between two
+# copies of this list -- the suppressor here knew <tvoe_calls>, DSML's
+# pipe-prefixed tags and a bare <invoke>, while the provider-side extractor
+# keyed on the literal <minimax:tool_call> wrapper alone. Every variant only
+# the suppressor knew was therefore hidden from the user and never executed:
+# a silent, total loss of the tool call, with nothing on screen to hint at it.
+# What gets hidden and what gets executed must come from the same definition,
+# so the parser below is built from these same constants.
+_DSML_PREFIX = r"[|｜]\s*DSML\s*[|｜]\s*"
+
+
+def _tag(name: str) -> str:
+    """A tag name, bare or DSML-pipe-prefixed (ASCII or fullwidth pipe)."""
+    return rf"(?:{name}|{_DSML_PREFIX}{name})"
+
+
+_INVOKE_TAG = _tag("invoke")
+_PARAMETER_TAG = _tag("parameter")
+
 _TEXT_PROTOCOL_MARKER_RE = re.compile(
     (
         r"<\s*(?:minimax:tool_call|tool_calls?|tvoe_calls|invoke\b|"
@@ -20,18 +44,16 @@ _TEXT_PROTOCOL_MARKER_RE = re.compile(
     ),
     re.IGNORECASE,
 )
+# Deliberately narrower than the parser's parameter pattern below: this one
+# is a leak-detection heuristic ("does this suffix look like protocol?") and
+# keys on parameter names that only ever appear in real tool calls. The
+# parser must accept any name. Only the tag vocabulary is shared.
 _TEXT_PROTOCOL_PARAMETER_RE = re.compile(
-    (
-        r"<\s*(?:parameter|[|｜]\s*DSML\s*[|｜]\s*parameter)\s+"
-        r"name\s*=\s*[\"'](?:path|content|command|code|patch|sheets)[\"']"
-    ),
+    rf"<\s*{_PARAMETER_TAG}\s+name\s*=\s*[\"'](?:path|content|command|code|patch|sheets)[\"']",
     re.IGNORECASE,
 )
 _TEXT_PROTOCOL_INVOKE_RE = re.compile(
-    (
-        r"<\s*(?:invoke|[|｜]\s*DSML\s*[|｜]\s*invoke)\s+"
-        r"name\s*=\s*[\"'][A-Za-z_][A-Za-z0-9_.:-]*[\"']"
-    ),
+    rf"<\s*{_INVOKE_TAG}\s+name\s*=\s*[\"'][A-Za-z_][A-Za-z0-9_.:-]*[\"']",
     re.IGNORECASE,
 )
 _TEXT_PROTOCOL_HTML_RE = re.compile(
@@ -217,6 +239,73 @@ class ProtocolTextLeakGuard:
             self._suppressed = False
             return ""
         return self.flush()
+
+
+@dataclass(frozen=True)
+class TextToolInvocation:
+    """A tool call a model encoded in its text instead of the tool-call API."""
+
+    name: str
+    arguments: dict[str, Any]
+
+
+# Keyed on a well-formed <invoke name="..."> ... </invoke> pair rather than on
+# the wrapper around it. Which wrapper a model happens to emit --
+# <minimax:tool_call>, <tvoe_calls>, a DSML pipe tag, or nothing at all -- says
+# nothing about whether the call inside is real, and gating on the wrapper is
+# what lost every non-MiniMax variant in #1514.
+_INVOCATION_RE = re.compile(
+    rf'<\s*{_INVOKE_TAG}\s+name\s*=\s*"([^"]+)"\s*>(.*?)<\s*/\s*{_INVOKE_TAG}\s*>',
+    re.DOTALL | re.IGNORECASE,
+)
+_INVOCATION_PARAMETER_RE = re.compile(
+    rf'<\s*{_PARAMETER_TAG}\s+name\s*=\s*"([^"]+)"([^>]*)>(.*?)<\s*/\s*{_PARAMETER_TAG}\s*>',
+    re.DOTALL | re.IGNORECASE,
+)
+# DSML marks each parameter with string="true"/"false" to say whether the body
+# is a literal or JSON to decode. Ignoring it hands a tool an escaped JSON
+# string where its schema expects structured data -- create_xlsx receives a
+# string instead of a list of rows and fails on a call that was well-formed.
+_STRING_ATTR_RE = re.compile(r'string\s*=\s*"\s*(true|false)\s*"', re.IGNORECASE)
+
+
+def _parameter_value(raw: str, attributes: str) -> Any:
+    if raw.startswith("\n"):
+        raw = raw[1:]
+    if raw.endswith("\n"):
+        raw = raw[:-1]
+    attr = _STRING_ATTR_RE.search(attributes)
+    if attr is None or attr.group(1).lower() != "false":
+        return raw
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        # A model that mislabels a literal as JSON should not lose the call;
+        # the tool's own schema validation is the better place to reject it.
+        return raw
+
+
+def parse_text_tool_invocations(text: str) -> list[TextToolInvocation]:
+    """Extract tool calls a model encoded as text markup.
+
+    Recognises exactly the invoke/parameter tag forms the leak suppressor in
+    this module hides, because both are built from the same tag constants.
+    """
+    if not text:
+        return []
+
+    invocations: list[TextToolInvocation] = []
+    for invoke in _INVOCATION_RE.finditer(text):
+        name = invoke.group(1).strip()
+        if not name:
+            continue
+        arguments: dict[str, Any] = {}
+        for parameter in _INVOCATION_PARAMETER_RE.finditer(invoke.group(2)):
+            key = parameter.group(1).strip()
+            if key:
+                arguments[key] = _parameter_value(parameter.group(3), parameter.group(2))
+        invocations.append(TextToolInvocation(name=name, arguments=arguments))
+    return invocations
 
 
 def strip_synthetic_tool_call_suffix(text: str, tool_names: list[str]) -> str:
