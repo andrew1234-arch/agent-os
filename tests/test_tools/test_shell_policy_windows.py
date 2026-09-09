@@ -24,13 +24,56 @@ def _windows_policy_env(monkeypatch: pytest.MonkeyPatch):
         r"dEl C:\Windows\System32\config\SAM",
     ],
 )
-def test_windows_del_variants_are_denied(command: str) -> None:
+def test_windows_del_variants_require_approval(command: str) -> None:
+    """``del`` deletes a file, same as ``Remove-Item`` (see
+    ``test_windows_remove_item_variants_warn`` below) -- there is no reason
+    for the cmd.exe spelling to be treated more severely than the PowerShell
+    spelling of the identical operation. Both must go through the
+    two-step approval warnlist, not an unconditional hard deny.
+    """
     result = shell_policy.SafeBinPolicy.from_env().check(command)
+
+    assert result.allowed is True
+    assert result.needs_approval is True
+    assert "requires approval" in result.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"rmdir /s /q C:\tmp\stale",
+        r"RMDIR /s /q C:\tmp\stale",
+    ],
+)
+def test_windows_rmdir_variants_require_approval(command: str) -> None:
+    result = shell_policy.SafeBinPolicy.from_env().check(command)
+
+    assert result.allowed is True
+    assert result.needs_approval is True
+    assert "requires approval" in result.reason
+
+
+def test_windows_git_push_force_requires_approval() -> None:
+    result = shell_policy.SafeBinPolicy.from_env().check("git push --force origin main")
+
+    assert result.allowed is True
+    assert result.needs_approval is True
+    assert "requires approval" in result.reason
+
+
+def test_windows_clear_disk_remains_hard_denied() -> None:
+    """Unlike del/rmdir/git push --force, a full disk wipe stays an
+    unconditional hard deny -- it is categorically more destructive
+    (irreversible, whole-disk) than deleting specific files or a force
+    push, both of which have some recovery path (backups, reflog, remote
+    history). Confirms the DEFAULT_WARNLIST_WIN cleanup didn't
+    accidentally also drop it from DEFAULT_DENYLIST_WIN.
+    """
+    result = shell_policy.SafeBinPolicy.from_env().check("Clear-Disk -Number 0")
 
     assert result.allowed is False
     assert result.needs_approval is False
     assert "blocked by policy" in result.reason
-
 
 @pytest.mark.parametrize(
     "command",
@@ -74,13 +117,17 @@ def test_windows_empty_warn_env_clears_platform_default_warnlist(
 def test_windows_empty_warn_env_preserves_default_denylist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """del is no longer a denylist-only entry (see the approval-required
+    tests above), so this exercises a command that still is: clearing
+    AGENTOS_SAFE_BIN_WARN must not affect AGENTOS_SAFE_BIN_DENY -- the two
+    env knobs are independent, and Clear-Disk's hard deny must survive.
+    """
     monkeypatch.setenv("AGENTOS_SAFE_BIN_WARN", "")
 
-    result = shell_policy.SafeBinPolicy.from_env().check(r"del C:\Windows\System32\config\SAM")
+    result = shell_policy.SafeBinPolicy.from_env().check("Clear-Disk -Number 0")
 
     assert result.allowed is False
     assert result.needs_approval is False
-
 
 def test_legacy_shell_denylist_warns_once(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENTOS_SHELL_DENYLIST", r"\blegacy-block\b")

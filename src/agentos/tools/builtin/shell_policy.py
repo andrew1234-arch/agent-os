@@ -24,13 +24,10 @@ DEFAULT_DENYLIST: list[str] = [
 ]
 
 DEFAULT_DENYLIST_WIN: list[str] = [
-    r"\bdel\b",
-    r"\brmdir\b",
     r"\bFormat-Volume\b",
     r"\bStop-Computer\b",
     r"\bRestart-Computer\b",
     r"\bClear-Disk\b",
-    r"\bgit push --force\b",
 ]
 
 # Patterns that require two-step confirmation (warn, not block)
@@ -48,7 +45,6 @@ DEFAULT_WARNLIST_WIN: list[str] = [
     r"\bdel\b",
     r"\brmdir\b",
     r"\bRemove-Item\b",
-    r"\bClear-Disk\b",
     r"\bgit push --force\b",
 ]
 
@@ -70,10 +66,7 @@ def _legacy_denylist_if_set() -> list[str]:
 
         structlog.get_logger(__name__).warning(
             "shell_policy.legacy_deny_env_detected",
-            message=(
-                "AGENTOS_SHELL_DENYLIST is deprecated; use "
-                "AGENTOS_SAFE_BIN_DENY"
-            ),
+            message=("AGENTOS_SHELL_DENYLIST is deprecated; use AGENTOS_SAFE_BIN_DENY"),
         )
         _LEGACY_ENV_WARNED = True
     return _resolve_env_list(legacy)
