@@ -90,6 +90,71 @@ def test_dsml_text_tool_protocol_is_removed_before_user_display() -> None:
     )
 
 
+# ── text hidden here must also actually execute as a real tool call ──
+#
+# Regression coverage for the bug where this module's own leak-suppression
+# correctly hid these two wrapper variants from the user, but
+# provider.openai._synthesize_text_tool_events only recognized the literal
+# "<minimax:tool_call>" wrapper for extraction -- so both of the exact texts
+# above were hidden from the user AND silently never executed as a tool
+# call. Both fixtures are reused verbatim from the tests above: what gets
+# hidden from the user must be the same thing that gets executed, not two
+# independently-drifting definitions of "this is a tool call".
+
+
+def test_tvoe_calls_text_also_produces_a_real_tool_call() -> None:
+    from agentos.provider.openai import _synthesize_text_tool_events
+    from agentos.provider.types import ToolDefinition, ToolUseEndEvent, ToolUseStartEvent
+
+    text = (
+        "Let me write the dashboard now.\n\n"
+        '<tvoe_calls><invoke name="write_file">'
+        '<parameter name="path">index.html</parameter>'
+        '<parameter name="content"><!DOCTYPE html><html><body>app</body></html>'
+        "</parameter></invoke></tvoe_calls>"
+    )
+    tools = [ToolDefinition(name="write_file", description="", input_schema={"type": "object"})]
+
+    events = _synthesize_text_tool_events(text, tools)
+
+    assert len(events) == 2
+    start, end = events
+    assert isinstance(start, ToolUseStartEvent)
+    assert start.tool_name == "write_file"
+    assert isinstance(end, ToolUseEndEvent)
+    assert end.arguments == {
+        "path": "index.html",
+        "content": "<!DOCTYPE html><html><body>app</body></html>",
+    }
+
+
+def test_dsml_text_also_produces_a_real_tool_call_with_typed_arguments() -> None:
+    from agentos.provider.openai import _synthesize_text_tool_events
+    from agentos.provider.types import ToolDefinition, ToolUseEndEvent
+
+    text = (
+        "Let me create the printable daily record sheet as well:\n\n"
+        '<｜DSML｜tool_calls><｜DSML｜invoke name="create_xlsx">'
+        '<｜DSML｜parameter name="name" string="true">'
+        "bean-sprout-daily-record-sheet.xlsx"
+        "</｜DSML｜parameter>"
+        '<｜DSML｜parameter name="sheets" string="false">'
+        '[{"name":"Record Sheet","rows":[["Day","Height"]]}]'
+        "</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"
+    )
+    tools = [ToolDefinition(name="create_xlsx", description="", input_schema={"type": "object"})]
+
+    events = _synthesize_text_tool_events(text, tools)
+
+    assert len(events) == 2
+    end = events[1]
+    assert isinstance(end, ToolUseEndEvent)
+    # string="true" stays a literal string; string="false" is JSON-decoded
+    # into its real shape, not left as an escaped JSON string.
+    assert end.arguments["name"] == "bean-sprout-daily-record-sheet.xlsx"
+    assert end.arguments["sheets"] == [{"name": "Record Sheet", "rows": [["Day", "Height"]]}]
+
+
 def test_tool_scaffold_details_summary_is_removed_before_user_display() -> None:
     text = (
         "Let me read the specific problematic areas to fix them.\n\n"
@@ -147,12 +212,7 @@ def test_streaming_protocol_guard_drops_tool_scaffold_before_tool_use() -> None:
     assert guard.push("Let me read the specific problematic areas.\n\n<details>") == (
         "Let me read the specific problematic areas."
     )
-    assert (
-        guard.push(
-            "<summary>View areas around line 10393, 14751, and nearby</summary>"
-        )
-        == ""
-    )
+    assert guard.push("<summary>View areas around line 10393, 14751, and nearby</summary>") == ""
     assert guard.flush_before_tool_use() == ""
     assert guard.push("Fixed the issues.") == "Fixed the issues."
 
@@ -160,9 +220,7 @@ def test_streaming_protocol_guard_drops_tool_scaffold_before_tool_use() -> None:
 def test_streaming_protocol_guard_releases_regular_details_without_tool_use() -> None:
     guard = ProtocolTextLeakGuard()
 
-    assert guard.push("Here is a collapsible note.\n\n<details>") == (
-        "Here is a collapsible note."
-    )
+    assert guard.push("Here is a collapsible note.\n\n<details>") == ("Here is a collapsible note.")
     assert guard.push("<summary>More</summary>Visible note.</details>") == ""
     assert guard.flush() == "\n\n<details><summary>More</summary>Visible note.</details>"
 
@@ -223,7 +281,5 @@ def test_usage_fields_treat_explicit_canonical_zero_as_real_value() -> None:
 
 
 def test_openrouter_attribution_headers_are_scoped_to_openrouter_hosts() -> None:
-    assert openrouter_app_headers("https://api.openrouter.ai/v1")[
-        "X-OpenRouter-Title"
-    ] == "AgentOS"
+    assert openrouter_app_headers("https://api.openrouter.ai/v1")["X-OpenRouter-Title"] == "AgentOS"
     assert openrouter_app_headers("https://api.openai.com/v1") == {}
