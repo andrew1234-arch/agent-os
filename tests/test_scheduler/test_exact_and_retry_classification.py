@@ -200,6 +200,38 @@ def test_classify_error_defaults_to_transient() -> None:
     assert classify_error("something obscure") == "transient"
 
 
+def test_classify_error_bare_status_code_does_not_match_embedded_number() -> None:
+    # Bug: bare-digit patterns ("401", "403", "429", "502", "503", "504")
+    # used plain substring containment, so any unrelated number in the
+    # error text that happened to contain the same 3 digits triggered a
+    # false match -- e.g. "403" matching inside "...after 4033ms". Because
+    # the permanent-pattern loop runs first, this could misclassify an
+    # ordinary, genuinely transient timeout as permanent even when the text
+    # also contains an explicit transient signature like "timed out".
+    assert classify_error("Request timed out after 4033ms") == "transient"
+    assert classify_error("Upstream latency 4011ms on retry attempt") == "transient"
+    assert classify_error("Handler execution took 5029ms, exceeding budget") == "transient"
+    assert classify_error("Connection dropped at byte offset 50200") == "transient"
+    assert classify_error("job exceeded 5040ms execution window") == "transient"
+
+
+def test_classify_error_bare_status_code_still_matches_standalone() -> None:
+    # The fix must not lose real standalone status-code matches.
+    assert classify_error("HTTP 403 Forbidden") == "permanent"
+    assert classify_error("status code: 401") == "permanent"
+    assert classify_error("502 Bad Gateway") == "transient"
+    assert classify_error("Service Unavailable (503)") == "transient"
+    assert classify_error("too many requests, 429") == "transient"
+    assert classify_error("anthropic 529 overloaded_error") == "transient"
+
+
+def test_classify_error_textual_pattern_still_matches_compound_words() -> None:
+    # Only bare-digit patterns get word-boundary anchoring; textual patterns
+    # (e.g. "socket") intentionally keep substring matching so compound
+    # words like "websocket" still classify as transient.
+    assert classify_error("WebSocket connection closed unexpectedly") == "transient"
+
+
 def _recurring_failure(error: str) -> CronJob:
     return CronJob(
         id="job-1",
@@ -225,13 +257,25 @@ def test_permanent_error_disables_recurring_job_immediately() -> None:
 
 def test_transient_error_keeps_recurring_job_pending_with_backoff() -> None:
     job = _recurring_failure("HTTP 503 service unavailable")
-    execution = JobExecution(
-        job_id=job.id, success=False, error="HTTP 503 service unavailable"
-    )
+    execution = JobExecution(job_id=job.id, success=False, error="HTTP 503 service unavailable")
     _apply_result_state(job, execution, datetime.now(UTC))
     assert job.status == JobStatus.PENDING
     assert job.enabled is True
     assert job.backoff_until is not None
+
+
+def test_ordinary_timeout_with_embedded_number_does_not_disable_job() -> None:
+    # Regression for the bare-status-code substring bug: a plain timeout
+    # error whose message happens to contain a millisecond duration like
+    # "4033ms" must not be treated as a permanent (401/403-style) error and
+    # must not disable the job on its first failure.
+    job = _recurring_failure("Request timed out after 4033ms")
+    execution = JobExecution(job_id=job.id, success=False, error="Request timed out after 4033ms")
+    _apply_result_state(job, execution, datetime.now(UTC))
+    assert job.status == JobStatus.PENDING
+    assert job.enabled is True
+    assert job.backoff_until is not None
+    assert job.consecutive_errors == 1
 
 
 def test_permanent_error_disables_one_shot_at_job() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -89,6 +90,32 @@ _PERMANENT_ERROR_PATTERNS = (
     "no handler registered",
 )
 
+_BARE_NUMERIC_PATTERN_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _pattern_matches(pattern: str, lowered_text: str) -> bool:
+    """Return True if *pattern* is present in *lowered_text*.
+
+    Bare-digit patterns (e.g. "403", "502") are anchored to word boundaries
+    instead of using plain substring containment. Without this, a status
+    code pattern silently matches inside any unrelated number that happens
+    to contain the same digits -- e.g. the permanent-error pattern "403"
+    matches inside "...timed out after 4033ms", misclassifying an ordinary,
+    genuinely transient timeout (which even contains the "timed out"
+    transient pattern itself) as permanent, since the permanent-pattern
+    loop runs first. Digits are word characters in regex, so \\b403\\b
+    matches a standalone "403" (e.g. "HTTP 403 Forbidden") but not "4033"
+    or "5403". Textual patterns keep plain substring matching so compound
+    words like "websocket" still match "socket" as intended.
+    """
+    if pattern.isdigit():
+        rx = _BARE_NUMERIC_PATTERN_RE_CACHE.get(pattern)
+        if rx is None:
+            rx = re.compile(rf"\b{re.escape(pattern)}\b")
+            _BARE_NUMERIC_PATTERN_RE_CACHE[pattern] = rx
+        return rx.search(lowered_text) is not None
+    return pattern in lowered_text
+
 
 def classify_error(error_text: str | None) -> str:
     """Return 'transient' or 'permanent' for a job error string.
@@ -101,10 +128,10 @@ def classify_error(error_text: str | None) -> str:
         return "transient"
     lowered = error_text.lower()
     for pattern in _PERMANENT_ERROR_PATTERNS:
-        if pattern in lowered:
+        if _pattern_matches(pattern, lowered):
             return "permanent"
     for pattern in _TRANSIENT_ERROR_PATTERNS:
-        if pattern in lowered:
+        if _pattern_matches(pattern, lowered):
             return "transient"
     return "transient"
 
