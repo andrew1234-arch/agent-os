@@ -492,7 +492,13 @@ class SessionManager:
 
     async def _rotate_session_id(self, node: SessionNode) -> SessionNode:
         old_session_id = node.session_id
-        await self._archive_session_identity(node)
+        archive_safe = await self._archive_session_identity(node)
+        if not archive_safe:
+            raise RuntimeError(
+                f"Safety archive failed before resetting session {node.session_key!r}; "
+                "aborting the reset instead of deleting the transcript and summaries "
+                "without a backup."
+            )
         await self._storage.delete_transcript(old_session_id)
         await self._storage.delete_summaries(old_session_id)
         await self._storage.invalidate_context_states(
@@ -521,18 +527,20 @@ class SessionManager:
     async def _archive_session_identity(self, node: SessionNode) -> bool:
         """Best-effort raw archive before a same-key transcript reset.
 
-        Returns ``True`` when a non-empty archive file was written to disk,
-        ``False`` when there was nothing to archive or the write failed. The
-        reset path uses the return value to decide whether a destructive
-        rotation is safe to fall back to when the memory-flush service is
-        unavailable.
+        Returns ``True`` when it is safe for the caller to proceed with a
+        destructive follow-up: either the transcript and summaries were
+        archived to disk successfully, or there was nothing to archive in
+        the first place (an empty session has nothing to lose). Returns
+        ``False`` only when there was real content to preserve and the
+        archive write itself failed -- the one case where a caller must
+        NOT proceed with a destructive delete.
         """
 
         try:
             entries = await self._storage.get_canonical_transcript(node.session_id)
             summaries = await self._storage.get_all_summaries(node.session_id)
             if not entries and not summaries:
-                return False
+                return True
             archive_dir = _archive_dir()
             archive_dir.mkdir(parents=True, exist_ok=True)
             safe_key = _safe_archive_part(node.session_key)
@@ -551,6 +559,13 @@ class SessionManager:
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             return True
         except Exception:
+            import structlog as _structlog
+
+            _structlog.get_logger(__name__).warning(
+                "session.archive_before_reset_failed",
+                session_key=node.session_key,
+                session_id=node.session_id,
+            )
             return False
 
     async def rotate_session_id_archive_only(self, session_key: str) -> SessionNode:

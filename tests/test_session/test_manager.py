@@ -208,9 +208,11 @@ async def test_apply_intent_reset_same_key_missing_creates_session(manager):
 
 
 @pytest.mark.asyncio
-async def test_apply_intent_reset_same_key_archive_failure_does_not_block(
+async def test_apply_intent_reset_same_key_aborts_when_archive_fails(
     manager, tmp_path, monkeypatch
 ):
+    """A session with real content: if the safety archive can't be written,
+    the reset must abort rather than delete the transcript with no backup."""
     archive_file = tmp_path / "not-a-directory"
     archive_file.write_text("occupied", encoding="utf-8")
     monkeypatch.setenv("AGENTOS_SESSION_ARCHIVE_DIR", str(archive_file))
@@ -218,11 +220,32 @@ async def test_apply_intent_reset_same_key_archive_failure_does_not_block(
     old_session_id = node.session_id
     await manager.append_message("agent:main:main", "user", "hello")
 
+    with pytest.raises(RuntimeError, match="archive"):
+        await manager.apply_intent("agent:main:main", SessionIntent.RESET_SAME_KEY)
+
+    # Nothing was deleted: the original transcript and identity survive.
+    assert await manager._storage.count_transcript_entries(old_session_id) == 1
+    unchanged = await manager._storage.get_session("agent:main:main")
+    assert unchanged is not None
+    assert unchanged.session_id == old_session_id
+
+
+@pytest.mark.asyncio
+async def test_apply_intent_reset_same_key_empty_session_still_resets_despite_broken_archive_dir(
+    manager, tmp_path, monkeypatch
+):
+    """An empty session has nothing to lose, so a broken archive path must
+    not block the reset -- there is nothing for the archive to protect."""
+    archive_file = tmp_path / "not-a-directory"
+    archive_file.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("AGENTOS_SESSION_ARCHIVE_DIR", str(archive_file))
+    node = await manager.create("agent:main:main")
+    old_session_id = node.session_id
+
     applied, rotated = await manager.apply_intent("agent:main:main", SessionIntent.RESET_SAME_KEY)
 
     assert rotated is True
     assert applied.session_id != old_session_id
-    assert await manager._storage.count_transcript_entries(old_session_id) == 0
 
 
 @pytest.mark.asyncio
