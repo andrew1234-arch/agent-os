@@ -92,12 +92,8 @@ class BreakerSettings:
             return cls()
         return cls(
             enabled=bool(getattr(config, "enabled", True)),
-            failure_threshold=int(
-                getattr(config, "failure_threshold", DEFAULT_FAILURE_THRESHOLD)
-            ),
-            cooldown_seconds=float(
-                getattr(config, "cooldown_seconds", DEFAULT_COOLDOWN_SECONDS)
-            ),
+            failure_threshold=int(getattr(config, "failure_threshold", DEFAULT_FAILURE_THRESHOLD)),
+            cooldown_seconds=float(getattr(config, "cooldown_seconds", DEFAULT_COOLDOWN_SECONDS)),
             max_cooldown_seconds=float(
                 getattr(config, "max_cooldown_seconds", DEFAULT_MAX_COOLDOWN_SECONDS)
             ),
@@ -162,7 +158,8 @@ class ProviderCircuitBreaker:
         closed --(N tripping failures)--> open
         open --(cooldown elapsed, one caller admitted)--> half_open
         half_open --(success)--> closed
-        half_open --(failure)--> open   # with a longer cooldown
+        half_open --(tripping failure)--> open   # with a longer cooldown
+        half_open --(non-tripping failure)--> half_open  # slot released, re-probes immediately
 
     All methods are safe to call from multiple threads and from concurrent
     turns; a single lock guards the whole table.
@@ -247,10 +244,23 @@ class ProviderCircuitBreaker:
         """
         if not self._settings.enabled or not provider:
             return BreakerState.CLOSED
+
         if kind is not None and not trips_breaker(kind):
             with self._lock:
                 entry = self._entries.get(provider)
-                return entry.state if entry else BreakerState.CLOSED
+                if entry is None:
+                    return BreakerState.CLOSED
+                if entry.state is BreakerState.HALF_OPEN:
+                    # This failure says nothing about provider health, so it
+                    # must not count as "the probe failed" -- but it *did*
+                    # consume the probe slot admitted by allow(). Leaving
+                    # probe_started_at set would block every other caller for
+                    # a full cooldown window on the strength of a failure
+                    # that never actually tested provider health. Releasing
+                    # it lets the very next allow() grant an immediate,
+                    # health-informative probe instead.
+                    entry.probe_started_at = None
+                return entry.state
         with self._lock:
             entry = self._entries.setdefault(provider, _Entry())
             now = self._clock()

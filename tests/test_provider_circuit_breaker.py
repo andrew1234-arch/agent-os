@@ -202,6 +202,51 @@ def test_abandoned_probe_does_not_wedge_the_breaker() -> None:
     assert breaker.allow("openrouter") is True
 
 
+def test_non_tripping_failure_during_a_probe_releases_it_immediately() -> None:
+    """A request-shaped failure during the probe must not wedge the breaker.
+
+    Regression test: record_failure's early-return for non-tripping kinds
+    used to leave probe_started_at untouched, so a single request-shaped
+    error landing on the admitted probe (e.g. the probe request happened to
+    name a bad model) would block every *other* caller to this provider for
+    a full cooldown window -- even though nothing had actually shown the
+    provider itself to be unhealthy.
+    """
+    clock = FakeClock()
+    breaker = _breaker(clock, threshold=1, cooldown=60.0)
+    _fail(breaker, "openrouter", 1)
+
+    clock.advance(60.0)
+    assert breaker.allow("openrouter") is True  # probe admitted
+    assert breaker.state("openrouter") is BreakerState.HALF_OPEN
+
+    result = breaker.record_failure("openrouter", ProviderFailureKind.MODEL_NOT_FOUND, "nope")
+
+    # The probe result was inconclusive about provider health, so the
+    # breaker stays half-open rather than assuming success -- but the slot
+    # must be released immediately, not held for a full cooldown window.
+    assert result is BreakerState.HALF_OPEN
+    assert breaker.state("openrouter") is BreakerState.HALF_OPEN
+    clock.advance(0.001)
+    assert breaker.allow("openrouter") is True
+
+
+def test_repeated_non_tripping_failures_during_probes_never_wedge_it() -> None:
+    """Several request-shaped failures in a row must each release the slot."""
+    clock = FakeClock()
+    breaker = _breaker(clock, threshold=1, cooldown=60.0)
+    _fail(breaker, "openrouter", 1)
+    clock.advance(60.0)
+
+    for _ in range(3):
+        assert breaker.allow("openrouter") is True
+        breaker.record_failure("openrouter", ProviderFailureKind.BAD_REQUEST, "bad")
+        clock.advance(0.001)
+
+    assert breaker.state("openrouter") is BreakerState.HALF_OPEN
+    assert breaker.allow("openrouter") is True
+
+
 def test_disabled_breaker_always_admits() -> None:
     clock = FakeClock()
     breaker = _breaker(clock, threshold=1, enabled=False)
@@ -214,9 +259,7 @@ def test_disabled_breaker_always_admits() -> None:
 
 
 def test_settings_clamp_nonsense_values() -> None:
-    settings = BreakerSettings(
-        failure_threshold=0, cooldown_seconds=-5.0, max_cooldown_seconds=0.0
-    )
+    settings = BreakerSettings(failure_threshold=0, cooldown_seconds=-5.0, max_cooldown_seconds=0.0)
     assert settings.failure_threshold == 1
     assert settings.cooldown_seconds == 1.0
     assert settings.max_cooldown_seconds == 1.0
@@ -351,9 +394,7 @@ def test_breaker_state_survives_clone() -> None:
 
 
 def test_selector_defaults_to_its_own_breaker() -> None:
-    selector = ModelSelector(
-        SelectorConfig(primary=ProviderConfig("openrouter", "m", api_key="k"))
-    )
+    selector = ModelSelector(SelectorConfig(primary=ProviderConfig("openrouter", "m", api_key="k")))
     assert selector.circuit_breaker is not None
     assert selector.clone().circuit_breaker is selector.circuit_breaker
 
