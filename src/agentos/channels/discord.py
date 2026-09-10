@@ -90,6 +90,7 @@ FATAL_ERROR_CLASSES: tuple[str, ...] = (
 class DiscordChannelConfig(BaseModel):
     """Pydantic config for Discord channel adapter."""
 
+    name: str = "discord"
     token: str
     application_id: str = ""
     default_channel_id: str = ""
@@ -729,7 +730,7 @@ class DiscordChannel:
                 session_mode = parts[3]
                 session_peer = parts[4]
                 expected_peer = channel_id if session_mode in ("group", "channel") else user_id
-                if session_channel != "discord" or session_peer != expected_peer:
+                if session_channel != self.config.name or session_peer != expected_peer:
                     log.warning(
                         "discord.component_mismatch",
                         session_key=session_key,
