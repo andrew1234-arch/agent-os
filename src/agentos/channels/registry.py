@@ -229,4 +229,6 @@ def _build_generic_channel(
         return cast("ManagedChannel", channel_class(config=config_class(**config_kwargs)))
 
     kwargs = {key: value for key, value in data.items() if key in accepted}
+    if "name" in accepted and hasattr(entry, "name"):
+        kwargs["name"] = entry.name
     return cast("ManagedChannel", channel_class(**kwargs))

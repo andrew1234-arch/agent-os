@@ -104,7 +104,7 @@ class SlackChannel:
 
     token: str
     slack_channel_id: str
-    channel_id: str = "slack"
+    name: str = "slack"
     sender_id: str = "slack-user"
     bot_user_id: str | None = None
     reply_in_thread: bool = False
@@ -916,7 +916,7 @@ class SlackChannel:
                 session_mode = parts[3]
                 session_peer = parts[4]
                 expected_peer = channel_id if session_mode in ("group", "channel") else user_id
-                if session_channel != self.channel_id or session_peer != expected_peer:
+                if session_channel != self.name or session_peer != expected_peer:
                     log.warning(
                         "slack.interactive_mismatch",
                         session_key=session_key,
