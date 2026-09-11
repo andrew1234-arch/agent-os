@@ -457,6 +457,26 @@ def _upsert_update_clause(write_reservation: bool) -> str:
     return _UPSERT_CLAUSE_KEEPING_RESERVATION
 
 
+#: Ceiling for list_executions()'s `limit`. See _clamp_list_executions_limit.
+_MAX_LIST_EXECUTIONS_LIMIT = 1000
+
+
+def _clamp_list_executions_limit(limit: int) -> int:
+    """Clamp list_executions()'s `limit` into [1, _MAX_LIST_EXECUTIONS_LIMIT].
+
+    SQLite treats a negative LIMIT as "no limit" (returns the job's entire
+    run history in one response), and an unbounded positive value has no
+    ceiling at all. Split out as its own function so the boundary can be
+    unit-tested directly, without needing to seed a database past the
+    ceiling to prove it holds. engine.get_runs() and ops.get_runs() are
+    pure passthroughs to list_executions() with no clamping of their own
+    (confirmed by reading both directly), so every caller -- including
+    rpc_cron.py's cron.runs RPC handler, which itself does no clamping --
+    is protected by fixing it here rather than at each call site.
+    """
+    return min(max(1, limit), _MAX_LIST_EXECUTIONS_LIMIT)
+
+
 class JobStore:
     """Async SQLite store for CronJob records."""
 
@@ -959,9 +979,14 @@ class JobStore:
                 await self._db().commit()
 
     async def list_executions(self, job_id: str, limit: int = 20) -> list[JobExecution]:
+        # See _clamp_list_executions_limit for why: this is the shared sink
+        # every read path (engine.get_runs, ops.get_runs, and rpc_cron.py's
+        # cron.runs RPC handler) funnels into unclamped, so the guard
+        # belongs here rather than duplicated at each call site.
+        clamped_limit = _clamp_list_executions_limit(limit)
         async with self._db().execute(
             "SELECT * FROM scheduler_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?",
-            (job_id, limit),
+            (job_id, clamped_limit),
         ) as cur:
             rows = await cur.fetchall()
             return [_row_to_execution(r) for r in rows]
