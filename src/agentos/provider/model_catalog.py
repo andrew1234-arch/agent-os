@@ -235,17 +235,27 @@ class ModelCatalog:
         base_url: str = "",
     ) -> ModelCapabilities:
         """Resolve ModelCapabilities for a model based on provider and catalog data."""
-        if provider_name == "anthropic":
-            return ModelCapabilities()
-        if provider_name == "ollama":
-            return ModelCapabilities()
+        # Normalized once, up front, and used for every provider comparison
+        # below -- provider_name flows in unnormalized from LlmProviderConfig
+        # (a plain `str` field with no case-folding validator), so a config
+        # of "OpenAI"/"Anthropic"/"Ollama" must resolve identically to the
+        # lowercase form. Comparing the raw provider_name in some branches
+        # and this normalized value in others let differently-cased config
+        # silently skip the anthropic/ollama/openai special-casing entirely
+        # -- concretely, a real GPT-5 model configured as "OpenAI" lost
+        # supports_reasoning, and DeepSeek routed through an "OpenAI" proxy
+        # lost its reasoning_format, falling through to the generic default.
         provider_id = provider_name.strip().lower()
+        if provider_id == "anthropic":
+            return ModelCapabilities()
+        if provider_id == "ollama":
+            return ModelCapabilities()
         try:
             provider_spec = get_provider_spec(provider_id)
         except UnknownProviderError:
             provider_spec = None
 
-        if provider_name == "openai" and "deepseek" in base_url.lower():
+        if provider_id == "openai" and "deepseek" in base_url.lower():
             return ModelCapabilities(
                 supports_reasoning=True, supports_tools=True, reasoning_format="deepseek"
             )
@@ -259,7 +269,7 @@ class ModelCatalog:
             )
         model_l = model_id.strip().lower()
         if (
-            provider_name == "openai"
+            provider_id == "openai"
             and "api.openai.com" in base_url.lower()
             and model_l.startswith(("gpt-5", "o1", "o3", "o4"))
         ):

@@ -47,6 +47,48 @@ def test_direct_openai_gpt_5_models_use_openai_reasoning_effort_format() -> None
         assert caps.reasoning_format == "openai"
 
 
+def test_get_capabilities_is_case_insensitive_on_provider_name() -> None:
+    """provider_name comparisons must not depend on exact casing.
+
+    Regression test: LlmProviderConfig.provider is a plain ``str`` field
+    with no case-folding validator, so a config of "OpenAI" (a natural way
+    to type the name) is just as valid input as "openai". get_capabilities
+    used to compare the *raw* provider_name for its anthropic/ollama/openai
+    special-casing while using a separately lowercased copy for everything
+    else -- so "OpenAI" silently fell through to the generic fallback,
+    losing supports_reasoning entirely for real GPT-5 models.
+    """
+    catalog = ModelCatalog()
+
+    for provider_name in ("openai", "OpenAI", "OPENAI", " OpenAI "):
+        caps = catalog.get_capabilities(
+            "gpt-5.6",
+            provider_name=provider_name,
+            base_url="https://api.openai.com/v1",
+        )
+        assert caps.supports_reasoning is True, provider_name
+        assert caps.reasoning_format == "openai", provider_name
+
+    for provider_name in ("openai", "OpenAI"):
+        caps = catalog.get_capabilities(
+            "deepseek-chat",
+            provider_name=provider_name,
+            base_url="https://deepseek-proxy.example.com/v1",
+        )
+        assert caps.supports_reasoning is True, provider_name
+        assert caps.reasoning_format == "deepseek", provider_name
+
+    for provider_name in ("anthropic", "Anthropic", "ANTHROPIC"):
+        assert catalog.get_capabilities(
+            "claude-sonnet-4-6", provider_name=provider_name
+        ) == catalog.get_capabilities("claude-sonnet-4-6", provider_name="anthropic")
+
+    for provider_name in ("ollama", "Ollama", "OLLAMA"):
+        assert catalog.get_capabilities(
+            "llama3", provider_name=provider_name
+        ) == catalog.get_capabilities("llama3", provider_name="ollama")
+
+
 def test_zai_glm5_models_use_zai_reasoning_format() -> None:
     catalog = ModelCatalog()
 

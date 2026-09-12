@@ -28,10 +28,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   clock but the "has the approval's lifespan expired?" check re-read
   `time.time()`; on Windows the wall clock ticks at ~15.6ms, so after a short
   wait it could still report the approval as younger than its lifespan and skip
-  the deny. The lifespan is now converted to the monotonic clock once at entry.
+    the deny. The lifespan is now converted to the monotonic clock once at entry.
   This was the intermittent
   `test_approval_queue_wait_denies_once_the_full_default_timeout_elapses`
   failure in the Windows CI job on `main`.
+
+- `ModelCatalog.get_capabilities` now normalizes `provider_name` once and
+  uses that normalized value for every comparison. `LlmProviderConfig.provider`
+  is a plain `str` field with no case-folding validator, so a config of
+  `"OpenAI"` was just as valid as `"openai"` — but the method compared the
+  *raw* `provider_name` against `"anthropic"`/`"ollama"`/`"openai"` in four
+  places while using a separately lowercased copy everywhere else, so any
+  differently-cased config silently skipped all four special-cased branches.
+  A real GPT-5 model configured as `"OpenAI"` lost `supports_reasoning`
+  entirely; DeepSeek routed through an `"OpenAI"`-labeled proxy lost its
+  `reasoning_format="deepseek"` classification.
+  ([#1899](https://github.com/use-agent-os/agent-os/issues/1899))
+
+## [2026.9.11] - 2026-09-11
 - `apply_patch` no longer rewrites every line of a CRLF file to LF. The
   reported symptom — `Context mismatch ... got '...\r'` — is not reachable
   through the tool: the update path read with `Path.read_text()`, whose
