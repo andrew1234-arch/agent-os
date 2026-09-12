@@ -1139,6 +1139,49 @@ class TestSessionsSend:
         assert res.error.code == "INVALID_REQUEST"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_message",
+        [
+            0,  # falsy: previously silently coerced to "" via `message_text or ""`
+            False,
+            None,  # explicit null: same silent-coercion path
+            [],
+            {},
+            12345,  # truthy non-string: previously crashed with a raw
+            # AttributeError ('int' object has no attribute 'lower') deep in
+            # normalize_incoming_text, leaking as INTERNAL_ERROR
+            ["hello"],
+            {"a": 1},
+        ],
+    )
+    async def test_send_rejects_non_string_message(
+        self, dispatcher, ctx_with_sessions, session, bad_message
+    ):
+        res = await dispatcher.dispatch(
+            "r1",
+            "sessions.send",
+            {"key": session.session_key, "message": bad_message},
+            ctx_with_sessions,
+        )
+        assert res.ok is False
+        assert res.error.code == "INVALID_REQUEST"
+        assert res.error.message == "params.message must be a string"
+
+    @pytest.mark.asyncio
+    async def test_send_accepts_empty_string_message(
+        self, dispatcher, ctx_with_sessions, session
+    ):
+        # An empty string is a legitimate message (e.g. attachment-only
+        # sends) and must not be rejected by the type check above.
+        res = await dispatcher.dispatch(
+            "r1",
+            "sessions.send",
+            {"key": session.session_key, "message": ""},
+            ctx_with_sessions,
+        )
+        assert res.ok is True
+
+    @pytest.mark.asyncio
     async def test_send_missing_key(self, dispatcher, ctx_with_sessions):
         res = await dispatcher.dispatch("r1", "sessions.send", {"message": "hi"}, ctx_with_sessions)
         assert res.ok is False

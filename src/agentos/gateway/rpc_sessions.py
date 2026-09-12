@@ -935,7 +935,9 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
     if not isinstance(params, dict) or "message" not in params:
         raise ValueError("params.message is required")
 
-    message_text: str = params["message"]
+    message_text = params["message"]
+    if not isinstance(message_text, str):
+        raise ValueError("params.message must be a string")
     source_hint = _normalize_session_send_source_hint(params)
     incoming_attachments = params.get("attachments", [])
     normalized_input = normalize_incoming_text(
