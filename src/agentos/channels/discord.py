@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from agentos.channels._attachment_io import (
     attachment_limit_for_mime,
+    ensure_bytes_within_limit,
     ensure_declared_size_within_limit,
     fetch_httpx_bytes_limited,
     preferred_attachment_mime,
@@ -1108,6 +1109,7 @@ class DiscordChannel:
         client = self._get_client()
         channel_id = message.reply_to or self.config.default_channel_id
         segments = self._split_content_for_send(message.content)
+        attachments = self._valid_outgoing_attachments(message.attachments)
 
         interaction_token = message.metadata.get("interaction_token")
         use_interaction_response = isinstance(interaction_token, str) and bool(interaction_token)
@@ -1130,26 +1132,37 @@ class DiscordChannel:
 
         result: ChannelSendResult | None = None
         for index, segment in enumerate(segments):
+            is_last = index == len(segments) - 1
             payload: dict[str, Any] = {"content": segment}
             # A reply reference belongs on the first message of a chunked
-            # reply; embeds/components describe the complete answer and
-            # belong on the last one, not repeated on every continuation.
+            # reply; embeds/components/attachments describe the complete
+            # answer and belong on the last one, not repeated on every
+            # continuation.
             if index == 0 and message.metadata.get("reply_to_message_id"):
                 payload["message_reference"] = {
                     "message_id": message.metadata["reply_to_message_id"],
                 }
-            if index == len(segments) - 1:
+            if is_last:
                 if message.metadata.get("embeds"):
                     payload["embeds"] = message.metadata["embeds"]
                 if message.metadata.get("components"):
                     payload["components"] = message.metadata["components"]
+
+            # Files ride a `payload_json` form field alongside numbered
+            # `files[n]` parts instead of a plain JSON body -- the two are
+            # mutually exclusive on the same request.
+            request_kwargs: dict[str, Any] = (
+                self._discord_multipart(payload, attachments)
+                if is_last and attachments
+                else {"json": payload}
+            )
 
             await self._rate_limiter.acquire()
             if use_interaction_response and index == 0:
                 resp = await retry_request(
                     client.patch,
                     f"/webhooks/{application_id}/{interaction_token}/messages/@original",
-                    json=payload,
+                    **request_kwargs,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -1175,8 +1188,8 @@ class DiscordChannel:
             resp = await retry_request(
                 client.post,
                 f"/channels/{channel_id}/messages",
-                json=payload,
                 headers=self._auth_headers(),
+                **request_kwargs,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -1206,6 +1219,50 @@ class DiscordChannel:
             if not tail:
                 return segments
             remaining = tail
+
+    def _valid_outgoing_attachments(self, attachments: list[Attachment]) -> list[Attachment]:
+        """Attachments with embedded bytes, dropped if over Discord's upload ceiling.
+
+        URL-only attachments (no ``data``) are skipped rather than fetched:
+        pulling an arbitrary caller-supplied URL from here would need the
+        same SSRF-safe path inbound attachment downloads already use
+        (``fetch_httpx_bytes_limited``), which is a separate concern from
+        relaying bytes the caller already has in hand.
+        """
+        valid: list[Attachment] = []
+        for attachment in attachments:
+            if attachment.data is None:
+                log.debug("discord.attachment_skipped_no_data", name=attachment.name)
+                continue
+            try:
+                ensure_bytes_within_limit(
+                    attachment.data, name=attachment.name, limit=self.MAX_FILE_BYTES
+                )
+            except ValueError as exc:
+                # Skip-and-log, not raise: send() is the shared reply path
+                # for every turn, so one oversized attachment must not cost
+                # the caller the text reply that came with it.
+                log.warning("discord.attachment_too_large", name=attachment.name, error=str(exc))
+                continue
+            valid.append(attachment)
+        return valid
+
+    @staticmethod
+    def _discord_multipart(
+        payload: dict[str, Any], attachments: list[Attachment]
+    ) -> dict[str, Any]:
+        """``data``/``files`` kwargs for a create/edit-message call carrying files."""
+        return {
+            "data": {"payload_json": json.dumps(payload)},
+            "files": {
+                f"files[{i}]": (
+                    attachment.name,
+                    attachment.data,
+                    attachment.mime_type or "application/octet-stream",
+                )
+                for i, attachment in enumerate(attachments)
+            },
+        }
 
     MAX_FILE_BYTES: ClassVar[int] = 10 * 1024 * 1024
 

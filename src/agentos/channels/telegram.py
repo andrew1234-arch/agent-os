@@ -20,6 +20,7 @@ from starlette.routing import Route
 from agentos.channel_pairing import ChannelPairingStore, PairingStoreError
 from agentos.channels._attachment_io import (
     attachment_limit_for_mime,
+    ensure_bytes_within_limit,
     ensure_declared_size_within_limit,
     fetch_httpx_bytes_limited,
     preferred_attachment_mime,
@@ -1256,6 +1257,75 @@ class TelegramChannel:
                 chunk_payload["text"] = segment
                 chunk_payload.pop("parse_mode", None)
                 result = await self._api("sendMessage", chunk_payload)
+        for attachment in self._valid_outgoing_attachments(message.attachments):
+            result = await self._send_attachment(
+                payload["chat_id"],
+                attachment,
+                thread_id=payload.get("message_thread_id"),
+            )
+        return result if isinstance(result, dict) else {"result": result}
+
+    def _valid_outgoing_attachments(self, attachments: list[Attachment]) -> list[Attachment]:
+        """Attachments with embedded bytes, dropped if over Telegram's upload ceiling.
+
+        URL-only attachments (no ``data``) are skipped rather than fetched:
+        pulling an arbitrary caller-supplied URL from here would need the
+        same SSRF-safe path inbound attachment downloads already use
+        (``fetch_httpx_bytes_limited``), which is a separate concern from
+        relaying bytes the caller already has in hand.
+        """
+        valid: list[Attachment] = []
+        for attachment in attachments:
+            if attachment.data is None:
+                log.debug("telegram.attachment_skipped_no_data", name=attachment.name)
+                continue
+            try:
+                ensure_bytes_within_limit(
+                    attachment.data, name=attachment.name, limit=self.MAX_FILE_BYTES
+                )
+            except ValueError as exc:
+                # Skip-and-log, not raise: send() is the shared reply path
+                # for every turn, so one oversized attachment must not cost
+                # the caller the text reply that came with it.
+                log.warning("telegram.attachment_too_large", name=attachment.name, error=str(exc))
+                continue
+            valid.append(attachment)
+        return valid
+
+    async def _send_attachment(
+        self,
+        chat_id: str,
+        attachment: Attachment,
+        *,
+        thread_id: int | str | None,
+    ) -> dict[str, Any]:
+        """Upload one attachment via ``sendDocument`` -- the same multipart
+        contract :meth:`send_file` already uses, so a generated deliverable
+        travels the same path whether it arrives as a `send_file` call or
+        as an attachment on an `OutgoingMessage`.
+        """
+        if not self.config.token:
+            raise ValueError("telegram API call requires token")
+        assert attachment.data is not None  # caller filters via _valid_outgoing_attachments
+        client = self._get_client()
+        form: dict[str, Any] = {"chat_id": str(chat_id)}
+        if thread_id:
+            form["message_thread_id"] = _coerce_telegram_int(thread_id)
+        try:
+            response = await client.post(
+                f"/bot{self.config.token}/sendDocument",
+                data=form,
+                files={
+                    "document": (
+                        attachment.name,
+                        attachment.data,
+                        attachment.mime_type or "application/octet-stream",
+                    )
+                },
+            )
+        except httpx.RequestError:
+            raise TelegramApiError("Telegram sendDocument request failed") from None
+        result = self._parse_api_response(response, "sendDocument")
         return result if isinstance(result, dict) else {"result": result}
 
     @staticmethod

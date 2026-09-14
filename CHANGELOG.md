@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Channels (Discord, Telegram): `OutgoingMessage.attachments` was ignored by
+  both adapters' `send()` -- only `message.content` ever reached the
+  platform, so a generated file, image, or other deliverable attached via
+  the `attachments` field vanished with no error, no warning, and no
+  upload, even though both channels already declare `native_file_upload`.
+  Discord now uploads attachments in the same multipart request as the
+  message they're attached to (`payload_json` + `files[n]`, on the last
+  chunk only, alongside embeds/components); Telegram uploads each one via
+  `sendDocument` after the text sends, the same multipart contract
+  `send_file` already used. An attachment with no `data` (URL-only) is
+  skipped rather than fetched, and one that exceeds the platform's upload
+  ceiling is dropped with a logged warning instead of failing the whole
+  send (#2147).
+
 ## [2026.9.14] - 2026-09-14
 
 ### Added
