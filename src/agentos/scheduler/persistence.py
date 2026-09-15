@@ -857,34 +857,41 @@ class JobStore:
         reservation_token: str,
         error: str,
     ) -> bool:
-        current = await self.get(job_id)
-        if current is None or current.reservation_token != reservation_token:
-            return False
-        current.status = JobStatus.FAILED
-        current.error_count += 1
-        current.consecutive_errors += 1
-        current.last_error = error
-        current.next_run_at = None
-        current.backoff_until = None
-        current.updated_at = datetime.now(UTC)
-        clear_reservation(current)
-        await self.save(current)
-        return True
+        # Same atomicity requirement as apply_reserved_result (jobs.py) --
+        # see the comment there. This is the same completion-side race, just
+        # for the missing-handler failure path instead of a normal result.
+        async with self.transaction() as store:
+            current = await store.get(job_id)
+            if current is None or current.reservation_token != reservation_token:
+                return False
+            current.status = JobStatus.FAILED
+            current.error_count += 1
+            current.consecutive_errors += 1
+            current.last_error = error
+            current.next_run_at = None
+            current.backoff_until = None
+            current.updated_at = datetime.now(UTC)
+            clear_reservation(current)
+            await store.save_no_commit(current)
+            return True
 
     async def release_reservation(
         self,
         job_id: str,
         reservation_token: str,
     ) -> bool:
-        current = await self.get(job_id)
-        if current is None or current.reservation_token != reservation_token:
-            return False
-        clear_reservation(current)
-        if current.status == JobStatus.RUNNING:
-            current.status = JobStatus.PENDING
-        current.updated_at = datetime.now(UTC)
-        await self.save(current)
-        return True
+        # Same atomicity requirement as apply_reserved_result (jobs.py) --
+        # see the comment there.
+        async with self.transaction() as store:
+            current = await store.get(job_id)
+            if current is None or current.reservation_token != reservation_token:
+                return False
+            clear_reservation(current)
+            if current.status == JobStatus.RUNNING:
+                current.status = JobStatus.PENDING
+            current.updated_at = datetime.now(UTC)
+            await store.save_no_commit(current)
+            return True
 
     async def delete(self, job_id: str) -> None:
         async with self._write_lock:

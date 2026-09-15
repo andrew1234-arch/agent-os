@@ -57,17 +57,24 @@ async def _reserve(store: JobStore) -> JobReservation:
 class _ReserveMidEdit:
     """Land an atomic reservation inside an ops read-modify-write.
 
-    ``ops`` reads the job, mutates a field, then saves it back. Reserving at
-    the top of that ``save`` reproduces the exact window: the row is reserved,
+    ``ops`` reads the job, mutates a field, then saves it back. ``pause``,
+    ``resume`` and ``update`` now do that read-modify-write inside
+    ``store.transaction()`` (the completion-side race fix in #2210 needs the
+    same span locked on this side too), so the write they issue is
+    ``save_no_commit`` rather than ``save``. Reserving at the top of that call
+    reproduces the exact window this test cares about: the row is reserved,
     but the job object about to be written still carries the pre-reservation
-    snapshot of the reservation columns.
+    snapshot of the reservation columns. Because the reservation now happens
+    on the *same* task, inside the same reentrant transaction lock ops
+    already holds, it lands in the same commit rather than a separate one —
+    still exactly the scenario ``write_reservation=False`` exists to survive.
     """
 
     def __init__(self, store: JobStore) -> None:
         self._store = store
-        self._original = store.save
+        self._original = store.save_no_commit
         self.reservation: JobReservation | None = None
-        store.save = self  # type: ignore[method-assign]
+        store.save_no_commit = self  # type: ignore[method-assign]
 
     async def __call__(self, job: CronJob, **kwargs: object) -> None:
         if self.reservation is None:

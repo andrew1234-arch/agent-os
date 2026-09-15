@@ -269,23 +269,37 @@ async def apply_reserved_result(
     execution: JobExecution,
     store: JobStore,
 ) -> bool:
-    """Apply an execution result only when the reservation token still owns the job."""
-    current = await store.get(job_id)
-    if current is None:
-        return False
-    if current.reservation_token != reservation_token:
-        return False
-    if current.status in (JobStatus.PAUSED, JobStatus.DISABLED):
-        clear_reservation(current)
-        await store.save(current)
-        return True
+    """Apply an execution result only when the reservation token still owns the job.
 
-    delete_job = _apply_result_state(current, execution, datetime.now(UTC))
-    if delete_job:
-        await store.delete(current.id)
-    else:
-        await store.save(current)
-    return True
+    The token check and the eventual save() must happen atomically with
+    respect to a concurrent pause()/resume()/update() or a fresh reservation
+    attempt -- store.transaction() holds the same store-wide write lock those
+    ops.py methods now take for their own read-modify-write span (see
+    SchedulerOps.pause/resume/update), so the two critical sections can never
+    interleave. Without this on both sides, a stale pre-write snapshot's
+    save() can revert a pause that landed mid-execution -- or the reverse,
+    where a stale pause() overwrites the completion's own bookkeeping
+    (run_count, next_run_at, error state) after the fact. #1537's fix only
+    protected ops.py's writes from touching the reservation columns; it left
+    this completion-side race, and the ops.py side of *this* race, open.
+    """
+    async with store.transaction() as txn_store:
+        current = await txn_store.get(job_id)
+        if current is None:
+            return False
+        if current.reservation_token != reservation_token:
+            return False
+        if current.status in (JobStatus.PAUSED, JobStatus.DISABLED):
+            clear_reservation(current)
+            await txn_store.save_no_commit(current)
+            return True
+
+        delete_job = _apply_result_state(current, execution, datetime.now(UTC))
+        if delete_job:
+            await txn_store.delete(current.id)
+        else:
+            await txn_store.save_no_commit(current)
+        return True
 
 
 def _apply_result_state(job: CronJob, execution: JobExecution, now: datetime) -> bool:

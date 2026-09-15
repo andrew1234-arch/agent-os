@@ -337,141 +337,151 @@ class SchedulerOps:
         return job
 
     async def update(self, job_id: str, **patch) -> CronJob | None:
-        """Apply a partial update to an existing job. Returns None if not found."""
-        job = await self._store.get(job_id)
-        if job is None:
-            return None
+        """Apply a partial update to an existing job. Returns None if not found.
 
-        now_local = self._now()
-        now = now_local.astimezone(UTC)
-        payload_patch = patch.pop("payload", None)
-        delivery_was_patched = "delivery" in patch
+        Reads and writes the job under the same store-wide transaction() lock
+        pause()/resume() use, and apply_reserved_result()/release_reservation()/
+        finalize_reserved_missing_handler() now use on the completion side --
+        see the comment on apply_reserved_result (scheduler/jobs.py) for why a
+        read-modify-write here must not interleave with theirs.
+        """
+        async with self._store.transaction():
+            job = await self._store.get(job_id)
+            if job is None:
+                return None
 
-        if "tz" in patch:
-            raw_tz = (patch.pop("tz") or "").strip()
-            validate_tz(raw_tz)
-            job.tz = raw_tz
+            now_local = self._now()
+            now = now_local.astimezone(UTC)
+            payload_patch = patch.pop("payload", None)
+            delivery_was_patched = "delivery" in patch
 
-        structured_kind = patch.pop("schedule_kind", None)
-        structured_value = patch.pop("schedule_value", None)
-        structured_tz = patch.pop("schedule_tz", None)
-        if structured_kind is not None and structured_value is not None:
-            kind, cron_expr = _validate_structured_schedule(structured_kind, structured_value)
-            if structured_tz is not None:
-                raw_tz = (structured_tz or "").strip()
+            if "tz" in patch:
+                raw_tz = (patch.pop("tz") or "").strip()
                 validate_tz(raw_tz)
                 job.tz = raw_tz
-            job.schedule_raw = cron_expr
-            job.schedule_kind = kind
-            job.cron_expr = cron_expr
-            # `add` sets delete_after_run for one-shot jobs only. Rescheduling a
-            # one-shot onto a recurring expression has to clear it too, or the
-            # edited job deletes itself after its first fire.
-            job.delete_after_run = kind == ScheduleKind.AT
-            if kind == ScheduleKind.AT:
-                job.anchor_at = None
-                at_dt = datetime.fromisoformat(cron_expr)
-                # Same past-timestamp guard as `add`: a one-shot being edited
-                # onto a past time is due on the next tick and would fire
-                # immediately with a stale payload.
-                if at_dt < now - timedelta(seconds=5):
-                    raise ValueError(
-                        f"AT schedule is in the past ({cron_expr}); a one-shot "
-                        "job cannot fire `now`."
-                    )
-                job.next_run_at = at_dt
-            elif kind == ScheduleKind.EVERY:
-                job.anchor_at = now
-                job.next_run_at = now + timedelta(seconds=int(cron_expr))
-            else:
-                job.anchor_at = None
-                job.next_run_at = _next_run(job, now)
-        elif "schedule_raw" in patch:
-            raise ValueError(
-                "ops.update no longer accepts schedule_raw; "
-                "pass schedule_kind + schedule_value instead"
-            )
 
-        for field in ("name", "timeout_seconds", "enabled", "origin_session_key"):
-            if field in patch:
-                if field == "timeout_seconds":
-                    value = patch[field]
-                    if value is None or value < 1 or value > _MAX_JOB_TIMEOUT_SECONDS:
+            structured_kind = patch.pop("schedule_kind", None)
+            structured_value = patch.pop("schedule_value", None)
+            structured_tz = patch.pop("schedule_tz", None)
+            if structured_kind is not None and structured_value is not None:
+                kind, cron_expr = _validate_structured_schedule(structured_kind, structured_value)
+                if structured_tz is not None:
+                    raw_tz = (structured_tz or "").strip()
+                    validate_tz(raw_tz)
+                    job.tz = raw_tz
+                job.schedule_raw = cron_expr
+                job.schedule_kind = kind
+                job.cron_expr = cron_expr
+                # `add` sets delete_after_run for one-shot jobs only. Rescheduling a
+                # one-shot onto a recurring expression has to clear it too, or the
+                # edited job deletes itself after its first fire.
+                job.delete_after_run = kind == ScheduleKind.AT
+                if kind == ScheduleKind.AT:
+                    job.anchor_at = None
+                    at_dt = datetime.fromisoformat(cron_expr)
+                    # Same past-timestamp guard as `add`: a one-shot being edited
+                    # onto a past time is due on the next tick and would fire
+                    # immediately with a stale payload.
+                    if at_dt < now - timedelta(seconds=5):
                         raise ValueError(
-                            f"timeout_seconds must be 1..{_MAX_JOB_TIMEOUT_SECONDS}, "
-                            f"got {value!r}"
+                            f"AT schedule is in the past ({cron_expr}); a one-shot "
+                            "job cannot fire `now`."
                         )
-                setattr(job, field, patch.pop(field))
-        # Validated after normalize_contract below: a patch that converts the
-        # job's kind also moves its handler_key, and the elevation rule is
-        # handler-specific. Checking it here would judge the new policy against
-        # the outgoing handler.
-        tool_policy_patched = "tool_policy" in patch
-        tool_policy_value = patch.pop("tool_policy", None)
-        if "wake_mode" in patch:
-            raw_wake_mode = patch.pop("wake_mode")
-            job.wake_mode = _coerce_wake_mode(raw_wake_mode)
+                    job.next_run_at = at_dt
+                elif kind == ScheduleKind.EVERY:
+                    job.anchor_at = now
+                    job.next_run_at = now + timedelta(seconds=int(cron_expr))
+                else:
+                    job.anchor_at = None
+                    job.next_run_at = _next_run(job, now)
+            elif "schedule_raw" in patch:
+                raise ValueError(
+                    "ops.update no longer accepts schedule_raw; "
+                    "pass schedule_kind + schedule_value instead"
+                )
 
-        if "session_target" in patch:
-            raw_target = patch.pop("session_target")
-            job.session_target = (
-                raw_target if isinstance(raw_target, SessionTarget) else SessionTarget(raw_target)
-            )
-        if "session_key" in patch:
-            job.session_key = patch.pop("session_key") or ""
+            for field in ("name", "timeout_seconds", "enabled", "origin_session_key"):
+                if field in patch:
+                    if field == "timeout_seconds":
+                        value = patch[field]
+                        if value is None or value < 1 or value > _MAX_JOB_TIMEOUT_SECONDS:
+                            raise ValueError(
+                                f"timeout_seconds must be 1..{_MAX_JOB_TIMEOUT_SECONDS}, "
+                                f"got {value!r}"
+                            )
+                    setattr(job, field, patch.pop(field))
+            # Validated after normalize_contract below: a patch that converts the
+            # job's kind also moves its handler_key, and the elevation rule is
+            # handler-specific. Checking it here would judge the new policy against
+            # the outgoing handler.
+            tool_policy_patched = "tool_policy" in patch
+            tool_policy_value = patch.pop("tool_policy", None)
+            if "wake_mode" in patch:
+                raw_wake_mode = patch.pop("wake_mode")
+                job.wake_mode = _coerce_wake_mode(raw_wake_mode)
 
-        if payload_patch:
-            # A patch that names its `kind` is a complete, already-normalized
-            # payload from the RPC layer — take it whole. Merging it would make
-            # optional keys unremovable: dropping a job's pre-run script sends a
-            # payload without `script`, and a merge would resurrect the old one.
-            # Partial patches (legacy callers touching one field) still merge.
-            if payload_patch.get("kind"):
-                job.payload = dict(payload_patch)
-            else:
-                job.payload = {**job.payload, **payload_patch}
-        if "delivery" in patch:
-            job.delivery = patch.pop("delivery")
+            if "session_target" in patch:
+                raw_target = patch.pop("session_target")
+                job.session_target = (
+                    raw_target
+                    if isinstance(raw_target, SessionTarget)
+                    else SessionTarget(raw_target)
+                )
+            if "session_key" in patch:
+                job.session_key = patch.pop("session_key") or ""
 
-        (
-            job.handler_key,
-            job.payload,
-            job.session_target,
-            job.session_key,
-        ) = normalize_contract(
-            handler_key=job.handler_key,
-            payload=job.payload,
-            session_target=job.session_target,
-            session_key=job.session_key,
-            origin_session_key=job.origin_session_key,
-            strict=True,
-        )
-        _validate_main_agent(job.payload, job.session_target)
-        if tool_policy_patched:
-            job.tool_policy = _normalized_tool_policy(
-                tool_policy_value,
+            if payload_patch:
+                # A patch that names its `kind` is a complete, already-normalized
+                # payload from the RPC layer — take it whole. Merging it would make
+                # optional keys unremovable: dropping a job's pre-run script sends a
+                # payload without `script`, and a merge would resurrect the old one.
+                # Partial patches (legacy callers touching one field) still merge.
+                if payload_patch.get("kind"):
+                    job.payload = dict(payload_patch)
+                else:
+                    job.payload = {**job.payload, **payload_patch}
+            if "delivery" in patch:
+                job.delivery = patch.pop("delivery")
+
+            (
+                job.handler_key,
+                job.payload,
+                job.session_target,
+                job.session_key,
+            ) = normalize_contract(
                 handler_key=job.handler_key,
+                payload=job.payload,
+                session_target=job.session_target,
+                session_key=job.session_key,
+                origin_session_key=job.origin_session_key,
+                strict=True,
             )
-        elif job.tool_policy.get("elevated") and job.handler_key != "agent_run":
-            # A kind conversion can strand elevation on a handler that never
-            # runs an agent turn — a shape `add` refuses to create. Dropping it
-            # is a privilege reduction, so it needs no ceremony; keeping it
-            # would leave a job elevated on paper and read-only in practice.
-            job.tool_policy = {k: v for k, v in job.tool_policy.items() if k != "elevated"}
-        job.delivery = _normalize_delivery_for_target(
-            session_target=job.session_target,
-            delivery=job.delivery,
-            explicit_delivery=delivery_was_patched,
-        )
-        job.origin_session_key = normalize_origin_session_key(
-            job.session_target,
-            job.origin_session_key,
-        )
+            _validate_main_agent(job.payload, job.session_target)
+            if tool_policy_patched:
+                job.tool_policy = _normalized_tool_policy(
+                    tool_policy_value,
+                    handler_key=job.handler_key,
+                )
+            elif job.tool_policy.get("elevated") and job.handler_key != "agent_run":
+                # A kind conversion can strand elevation on a handler that never
+                # runs an agent turn — a shape `add` refuses to create. Dropping it
+                # is a privilege reduction, so it needs no ceremony; keeping it
+                # would leave a job elevated on paper and read-only in practice.
+                job.tool_policy = {k: v for k, v in job.tool_policy.items() if k != "elevated"}
+            job.delivery = _normalize_delivery_for_target(
+                session_target=job.session_target,
+                delivery=job.delivery,
+                explicit_delivery=delivery_was_patched,
+            )
+            job.origin_session_key = normalize_origin_session_key(
+                job.session_target,
+                job.origin_session_key,
+            )
 
-        job.updated_at = now
-        _resolve_script_placeholder(job)
-        await self._store.save(job, write_reservation=False)
-        return job
+            job.updated_at = now
+            _resolve_script_placeholder(job)
+            await self._store.save_no_commit(job, write_reservation=False)
+            return job
 
     async def remove(self, job_id: str) -> bool:
         """Delete a job. Returns True if it existed."""
@@ -482,40 +492,52 @@ class SchedulerOps:
         return True
 
     async def pause(self, job_id: str) -> CronJob | None:
-        """Set job status to PAUSED. Returns None if not found."""
-        job = await self._store.get(job_id)
-        if job is None:
-            return None
-        job.status = JobStatus.PAUSED
-        job.updated_at = datetime.now(UTC)
-        await self._store.save(job, write_reservation=False)
-        return job
+        """Set job status to PAUSED. Returns None if not found.
+
+        See the comment on apply_reserved_result (scheduler/jobs.py): reading
+        and writing the job under store.transaction() keeps this atomic
+        against a concurrent completion (apply_reserved_result,
+        release_reservation, finalize_reserved_missing_handler), which uses
+        the same lock for its own read-modify-write span.
+        """
+        async with self._store.transaction():
+            job = await self._store.get(job_id)
+            if job is None:
+                return None
+            job.status = JobStatus.PAUSED
+            job.updated_at = datetime.now(UTC)
+            await self._store.save_no_commit(job, write_reservation=False)
+            return job
 
     async def resume(self, job_id: str) -> CronJob | None:
-        """Set job status to PENDING and recompute next_run_at. Returns None if not found."""
-        job = await self._store.get(job_id)
-        if job is None:
-            return None
+        """Set job status to PENDING and recompute next_run_at. Returns None if not found.
 
-        now = datetime.now(UTC)
-        job.status = JobStatus.PENDING
-        job.updated_at = now
+        Same atomicity requirement as pause() above.
+        """
+        async with self._store.transaction():
+            job = await self._store.get(job_id)
+            if job is None:
+                return None
 
-        if job.schedule_kind == ScheduleKind.AT:
-            # Keep existing next_run_at for one-shot jobs
-            pass
-        elif job.schedule_kind == ScheduleKind.EVERY and job.cron_expr.isdigit():
-            # Use anchor-aligned next_run when an anchor exists; otherwise
-            # match the historical "now + interval" behaviour.
-            if job.anchor_at is not None:
-                job.next_run_at = _next_run(job, now)
+            now = datetime.now(UTC)
+            job.status = JobStatus.PENDING
+            job.updated_at = now
+
+            if job.schedule_kind == ScheduleKind.AT:
+                # Keep existing next_run_at for one-shot jobs
+                pass
+            elif job.schedule_kind == ScheduleKind.EVERY and job.cron_expr.isdigit():
+                # Use anchor-aligned next_run when an anchor exists; otherwise
+                # match the historical "now + interval" behaviour.
+                if job.anchor_at is not None:
+                    job.next_run_at = _next_run(job, now)
+                else:
+                    job.next_run_at = now + timedelta(seconds=int(job.cron_expr))
             else:
-                job.next_run_at = now + timedelta(seconds=int(job.cron_expr))
-        else:
-            job.next_run_at = _next_run(job, now)
+                job.next_run_at = _next_run(job, now)
 
-        await self._store.save(job, write_reservation=False)
-        return job
+            await self._store.save_no_commit(job, write_reservation=False)
+            return job
 
     async def get(self, job_id: str) -> CronJob | None:
         """Retrieve a job by ID."""
