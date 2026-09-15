@@ -168,24 +168,53 @@ def resolve_agent_memory_dir(agent_id: str, base: str | Path | None = None) -> P
 
 
 def maybe_migrate_legacy_memory(base: str = "data") -> None:
-    """One-time migration: move data/memory.db + data/memory/ → data/agents/main/."""
+    """One-time migration: move data/memory.db + data/memory/ → data/agents/main/.
+
+    Runs on every startup and must be safely resumable: each of the four
+    legacy artifacts (memory.db, its -wal/-shm sidecars, and the memory/
+    directory) is checked and moved independently against its own
+    destination, rather than inferring "already migrated" from memory.db
+    alone. The four renames are not atomic as a group, so a process killed
+    partway through (OOM, forced restart) can leave any subset already moved
+    -- a single shared "done" flag based on one artifact would silently and
+    permanently strand whichever of the others didn't make it across, since
+    every future startup would draw the same wrong conclusion from that one
+    artifact and never look at the rest. This also covers an older legacy
+    layout with a memory/ directory but no memory.db at all, which the
+    original memory.db-gated check skipped entirely.
+
+    Each rename() is guarded against FileNotFoundError so two processes
+    racing the same migration (e.g. a supervisor restarting a crashed
+    process while the old one is still exiting) don't crash each other.
+    """
     legacy_db = Path(base) / "memory.db"
+    legacy_dir = Path(base) / "memory"
     target_dir = resolve_agent_data_dir("main", base)
 
-    if not legacy_db.exists():
-        return
-    if (target_dir / "memory.db").exists():
+    db_suffixes = ("", "-wal", "-shm")
+    legacy_db_paths = [Path(f"{legacy_db}{suffix}") for suffix in db_suffixes]
+
+    if not any(p.exists() for p in legacy_db_paths) and not legacy_dir.is_dir():
         return
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    for suffix in ("", "-wal", "-shm"):
-        src = Path(f"{legacy_db}{suffix}")
-        if src.exists():
-            src.rename(target_dir / f"memory.db{suffix}")
+    migrated_any = False
+    for suffix, src in zip(db_suffixes, legacy_db_paths):
+        dest = target_dir / f"memory.db{suffix}"
+        if src.exists() and not dest.exists():
+            try:
+                src.rename(dest)
+                migrated_any = True
+            except FileNotFoundError:
+                pass
 
-    legacy_dir = Path(base) / "memory"
-    if legacy_dir.is_dir():
-        legacy_dir.rename(target_dir / "memory")
+    if legacy_dir.is_dir() and not (target_dir / "memory").exists():
+        try:
+            legacy_dir.rename(target_dir / "memory")
+            migrated_any = True
+        except FileNotFoundError:
+            pass
 
-    log.info("legacy_memory_migrated", target=str(target_dir))
+    if migrated_any:
+        log.info("legacy_memory_migrated", target=str(target_dir))

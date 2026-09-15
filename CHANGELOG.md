@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Memory: `maybe_migrate_legacy_memory` (run on every gateway startup) could
+  permanently strand the legacy `data/memory/` directory -- the real
+  persisted markdown memory files -- if the process was killed between
+  moving `memory.db` and moving `memory/`. Its "already migrated?" check
+  looked at `memory.db` alone, so every future startup drew the same wrong
+  "done" conclusion from that one artifact and never looked at the rest.
+  Each of the four legacy artifacts (`memory.db`, its `-wal`/`-shm`
+  sidecars, and `memory/`) is now checked and moved independently against
+  its own destination, which also covers an older legacy layout with a
+  `memory/` directory but no `memory.db` at all (previously skipped
+  entirely by the same memory.db-gated check). Each move is guarded against
+  `FileNotFoundError` so two processes racing the same migration don't
+  crash each other (#2216).
+
 ## [2026.9.14] - 2026-09-14
 
 ### Added
