@@ -27,6 +27,7 @@ correctly.
 from __future__ import annotations
 
 import importlib
+import os
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,14 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+# The name _probe_resolution actually derives and looks for, on whatever
+# platform these tests are really running on (this file's CI runs both
+# ubuntu-latest and windows-latest) -- fixtures below must create a file
+# under this name, not a hardcoded POSIX "ffprobe", or the file-existence
+# guard correctly (and confusingly) fails on Windows for an unrelated
+# reason: no file by that name, not the bug under test.
+_PROBE_NAME = "ffprobe.exe" if os.name == "nt" else "ffprobe"
 
 _SCRIPTS = (
     Path(__file__).resolve().parents[1]
@@ -85,7 +94,7 @@ def test_manual_opt_ffmpeg_install_derives_ffprobe_beside_it(
     install.mkdir(parents=True)
     ffmpeg_bin = install / "ffmpeg"
     ffmpeg_bin.touch()
-    (install / "ffprobe").touch()
+    (install / _PROBE_NAME).touch()
     _fake_ffprobe_run(monkeypatch, 1920, 1080)
 
     result = burn._probe_resolution(str(ffmpeg_bin), tmp_path / "video.mp4")
@@ -103,7 +112,7 @@ def test_homebrew_cellar_install_derives_ffprobe_beside_it(
     install.mkdir(parents=True)
     ffmpeg_bin = install / "ffmpeg"
     ffmpeg_bin.touch()
-    (install / "ffprobe").touch()
+    (install / _PROBE_NAME).touch()
     _fake_ffprobe_run(monkeypatch, 3840, 2160)
 
     result = burn._probe_resolution(str(ffmpeg_bin), tmp_path / "video.mp4")
@@ -126,8 +135,7 @@ def test_ffmpeg_named_directory_with_exe_suffixed_binary_derives_ffprobe_beside_
     install.mkdir(parents=True)
     ffmpeg_bin = install / "ffmpeg.exe"
     ffmpeg_bin.touch()
-    expected_name = "ffprobe.exe" if burn.os.name == "nt" else "ffprobe"
-    (install / expected_name).touch()
+    (install / _PROBE_NAME).touch()
     _fake_ffprobe_run(monkeypatch, 1280, 720)
 
     result = burn._probe_resolution(str(ffmpeg_bin), tmp_path / "video.mp4")
@@ -147,7 +155,7 @@ def test_plain_usr_bin_install_still_works(
     install.mkdir(parents=True)
     ffmpeg_bin = install / "ffmpeg"
     ffmpeg_bin.touch()
-    (install / "ffprobe").touch()
+    (install / _PROBE_NAME).touch()
     _fake_ffprobe_run(monkeypatch, 640, 480)
 
     result = burn._probe_resolution(str(ffmpeg_bin), tmp_path / "video.mp4")
@@ -159,10 +167,11 @@ def test_bare_command_name_falls_back_to_path_lookup(
     burn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A bare "ffmpeg" (resolved via PATH, no directory at all) must derive
-    a bare "ffprobe" and look it up the same way, not crash on a path
-    operation."""
+    a bare "ffprobe" (matching this platform's own naming -- "ffprobe.exe"
+    on Windows, "ffprobe" elsewhere) and look it up the same way, not crash
+    on a path operation."""
     monkeypatch.setattr(
-        shutil, "which", lambda name: f"/resolved/{name}" if name == "ffprobe" else None
+        shutil, "which", lambda name: f"/resolved/{name}" if name == _PROBE_NAME else None
     )
     _fake_ffprobe_run(monkeypatch, 100, 200)
 
