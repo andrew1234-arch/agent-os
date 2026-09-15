@@ -644,7 +644,24 @@ def _emergency_compact_current_turn_payload_once(payload: dict[str, Any]) -> dic
     return compacted
 
 
-def _final_hard_cap_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
+def _critical_tool_message_indices(payload: dict[str, Any]) -> frozenset[int]:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return frozenset()
+    return frozenset(
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict)
+        and message.get("role") == "tool"
+        and _tool_content_is_critical(message.get("content"))
+    )
+
+
+def _final_hard_cap_payload_once(
+    payload: dict[str, Any],
+    *,
+    critical_tool_indices: frozenset[int] = frozenset(),
+) -> dict[str, Any]:
     compacted = deepcopy(payload)
     messages = compacted.get("messages", [])
     latest_user_index = None
@@ -667,7 +684,7 @@ def _final_hard_cap_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
                 )
             continue
         if role == "tool":
-            if _tool_content_is_critical(content):
+            if index in critical_tool_indices:
                 message["content"] = _critical_tool_content_for_provider(content)
             else:
                 message["content"] = _hard_compact_content_for_provider(
@@ -857,7 +874,10 @@ def prove_or_compact_provider_payload(
                 fallback_reason=fallback_reason,
             )
         except ProviderRequestBudgetExceededError as exc:
-            hard_compacted = _final_hard_cap_payload_once(emergency_compacted)
+            critical_tool_indices = _critical_tool_message_indices(payload)
+            hard_compacted = _final_hard_cap_payload_once(
+                emergency_compacted, critical_tool_indices=critical_tool_indices
+            )
             hard_compacted_chars = _payload_chars(hard_compacted)
             try:
                 proof = prove_provider_payload(

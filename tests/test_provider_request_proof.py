@@ -844,3 +844,56 @@ def test_provider_request_proof_final_hard_cap_preserves_critical_tool_result() 
     tool_content = compacted["messages"][4]["content"]
     assert "BOUNDARY_FAILURE_DETAIL" in tool_content
     assert "[agentos_compacted:tool_result" not in tool_content
+
+
+def test_provider_request_proof_final_hard_cap_critical_status_after_payload() -> None:
+    # Unlike the test above, execution_status is the *last* key, so it lands
+    # in the omitted middle of both prior compaction tiers' head/tail slices.
+    # The final hard-cap tier must still recognize this as critical.
+    critical_tool_result = json.dumps(
+        {
+            "output": "y" * 3000,
+            "execution_status": {"status": "error", "reason": "permission_denied"},
+        },
+        ensure_ascii=False,
+    )
+    payload = {
+        "messages": [
+            {"role": "user", "content": "old context\n" + ("u" * 8000)},
+            {"role": "assistant", "content": "old answer\n" + ("a" * 8000)},
+            {"role": "user", "content": "run the failing tool"},
+            {
+                "role": "assistant",
+                "content": "calling tool",
+                "tool_calls": [
+                    {
+                        "id": "call-critical",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": json.dumps({"cmd": "x" * 5000}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-critical",
+                "content": critical_tool_result,
+            },
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=2_200,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    assert proof["fits"] is True
+    assert proof["final_hard_cap_compacted"] is True
+    tool_content = compacted["messages"][4]["content"]
+    assert "permission_denied" in tool_content
+    assert "[agentos_compacted:tool_result" not in tool_content
