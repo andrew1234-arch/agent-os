@@ -897,3 +897,73 @@ def test_provider_request_proof_final_hard_cap_critical_status_after_payload() -
     tool_content = compacted["messages"][4]["content"]
     assert "permission_denied" in tool_content
     assert "[agentos_compacted:tool_result" not in tool_content
+
+
+def test_provider_request_proof_final_hard_cap_preserves_long_status_after_payload() -> None:
+    """andreapn's review on #2368: the first fix only got halfway.
+
+    ``_final_hard_cap_payload_once`` correctly identified this tool message
+    as critical, but re-derived its content from the already
+    emergency-compacted string (head 180 / tail 40 of the original) instead
+    of the original payload -- so a status object longer than the 40-char
+    tail still lost fields to the second round of compaction. The previous
+    test only happened to pass because "permission_denied"}} landed inside
+    that 40-char tail; this one uses a status object long enough that it
+    would not, and asserts on parsed JSON fields rather than a substring
+    that happens to survive, per the review.
+    """
+    critical_tool_result = json.dumps(
+        {
+            "output": "y" * 3000,
+            "execution_status": {
+                "status": "error",
+                "reason": "permission_denied",
+                "stderr": "cannot open /etc/shadow: Permission denied (os error 13)",
+            },
+        },
+        ensure_ascii=False,
+    )
+    payload = {
+        "messages": [
+            {"role": "user", "content": "old context\n" + ("u" * 8000)},
+            {"role": "assistant", "content": "old answer\n" + ("a" * 8000)},
+            {"role": "user", "content": "run the failing tool"},
+            {
+                "role": "assistant",
+                "content": "calling tool",
+                "tool_calls": [
+                    {
+                        "id": "call-critical",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": json.dumps({"cmd": "x" * 5000}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-critical",
+                "content": critical_tool_result,
+            },
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=2_200,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    assert proof["fits"] is True
+    assert proof["final_hard_cap_compacted"] is True
+    tool_content = compacted["messages"][4]["content"]
+    parsed = json.loads(tool_content)
+    assert parsed["execution_status"]["status"] == "error"
+    assert parsed["execution_status"]["reason"] == "permission_denied"
+    assert parsed["execution_status"]["stderr"] == (
+        "cannot open /etc/shadow: Permission denied (os error 13)"
+    )

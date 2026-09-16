@@ -443,9 +443,50 @@ def _tool_content_is_critical(content: Any) -> bool:
     return False
 
 
+_CRITICAL_DIAGNOSTIC_KEYS = frozenset({"execution_status", "is_error", "error"})
+
+
+def _critical_tool_string_for_provider(text: str) -> str:
+    """Hard-cap ``text`` while keeping genuine-failure diagnostics verbatim.
+
+    ``text`` must be the *original*, pre-compaction tool content -- not
+    something an earlier tier (``_compact_string``, ``_emergency_compact_string``)
+    has already truncated. Those tiers slice on raw character position, with
+    no awareness of where ``execution_status``/``is_error``/``error`` land;
+    running this on their output re-compacts whatever fragment of those keys
+    happened to survive, which is exactly the bug this function exists to
+    avoid (#2363).
+
+    When ``text`` parses as a JSON object carrying a failing
+    ``execution_status`` (or ``is_error``), every diagnostic key is kept as-is
+    and every other string field is hard-capped individually, so the result
+    stays small without risking the one thing that made this message
+    "critical" in the first place. Anything that doesn't parse that way falls
+    back to the prior whole-string emergency-compaction.
+    """
+    with contextlib.suppress(json.JSONDecodeError):
+        parsed = json.loads(text)
+        if isinstance(parsed, dict) and (
+            _execution_status_is_failure(parsed.get("execution_status"))
+            or parsed.get("is_error") is True
+        ):
+            preserved: dict[str, Any] = {}
+            for key, value in parsed.items():
+                if key in _CRITICAL_DIAGNOSTIC_KEYS:
+                    preserved[key] = value
+                elif isinstance(value, str):
+                    preserved[key] = _emergency_compact_string(
+                        value, label=f"critical_field_{key}"
+                    )
+                else:
+                    preserved[key] = value
+            return json.dumps(preserved, ensure_ascii=False, separators=(",", ":"))
+    return _emergency_compact_string(text, label="tool_result")
+
+
 def _critical_tool_content_for_provider(content: Any) -> Any:
     if isinstance(content, str):
-        return _emergency_compact_string(content, label="tool_result")
+        return _critical_tool_string_for_provider(content)
     if not isinstance(content, list):
         return content
     compacted: list[Any] = []
@@ -455,10 +496,7 @@ def _critical_tool_content_for_provider(content: Any) -> Any:
             continue
         next_block = dict(block)
         if isinstance(next_block.get("content"), str):
-            next_block["content"] = _emergency_compact_string(
-                next_block["content"],
-                label="tool_result",
-            )
+            next_block["content"] = _critical_tool_string_for_provider(next_block["content"])
         compacted.append(next_block)
     return compacted
 
@@ -644,24 +682,32 @@ def _emergency_compact_current_turn_payload_once(payload: dict[str, Any]) -> dic
     return compacted
 
 
-def _critical_tool_message_indices(payload: dict[str, Any]) -> frozenset[int]:
+def _critical_tool_message_content(payload: dict[str, Any]) -> dict[int, Any]:
+    """Map each critical tool message's index to its *original* content.
+
+    Read before any compaction tier runs, so the diagnostics this exists to
+    protect (``execution_status``, ``is_error``) are still intact -- by the
+    final hard-cap tier, ``payload``'s own copy of this content has already
+    been through up to three truncating tiers (#2363).
+    """
     messages = payload.get("messages")
     if not isinstance(messages, list):
-        return frozenset()
-    return frozenset(
-        index
+        return {}
+    return {
+        index: message.get("content")
         for index, message in enumerate(messages)
         if isinstance(message, dict)
         and message.get("role") == "tool"
         and _tool_content_is_critical(message.get("content"))
-    )
+    }
 
 
 def _final_hard_cap_payload_once(
     payload: dict[str, Any],
     *,
-    critical_tool_indices: frozenset[int] = frozenset(),
+    critical_tool_content: dict[int, Any] | None = None,
 ) -> dict[str, Any]:
+    critical_tool_content = critical_tool_content or {}
     compacted = deepcopy(payload)
     messages = compacted.get("messages", [])
     latest_user_index = None
@@ -684,8 +730,10 @@ def _final_hard_cap_payload_once(
                 )
             continue
         if role == "tool":
-            if index in critical_tool_indices:
-                message["content"] = _critical_tool_content_for_provider(content)
+            if index in critical_tool_content:
+                message["content"] = _critical_tool_content_for_provider(
+                    critical_tool_content[index]
+                )
             else:
                 message["content"] = _hard_compact_content_for_provider(
                     content,
@@ -874,9 +922,9 @@ def prove_or_compact_provider_payload(
                 fallback_reason=fallback_reason,
             )
         except ProviderRequestBudgetExceededError as exc:
-            critical_tool_indices = _critical_tool_message_indices(payload)
+            critical_tool_content = _critical_tool_message_content(payload)
             hard_compacted = _final_hard_cap_payload_once(
-                emergency_compacted, critical_tool_indices=critical_tool_indices
+                emergency_compacted, critical_tool_content=critical_tool_content
             )
             hard_compacted_chars = _payload_chars(hard_compacted)
             try:
