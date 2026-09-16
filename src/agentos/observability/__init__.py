@@ -52,6 +52,7 @@ from agentos.observability.retention import (
 from agentos.observability.safety_log import (
     SafetyEvent,
     SafetyEventType,
+    record_safety_event,
     write_safety_event,
 )
 from agentos.observability.trace import (
@@ -110,6 +111,7 @@ __all__ = [
     "load_turn",
     "prune_expired_log_files",
     "record_metric",
+    "record_safety_event",
     "register_trace_sink",
     "unregister_trace_sink",
     "write_decision_entry",

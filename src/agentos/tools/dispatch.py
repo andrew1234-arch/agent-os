@@ -27,6 +27,7 @@ import structlog
 
 from agentos.engine.hooks import ToolHook, ToolHookCall, ToolHookResult
 from agentos.execution_status import normalize_execution_status
+from agentos.observability.safety_log import SafetyEventType, record_safety_event
 from agentos.result_budget import (
     DEFAULT_TOOL_RESULT_BUDGET_POLICY,
     DEFAULT_TOOL_RUN_BUDGET_POLICY,
@@ -235,6 +236,12 @@ def _check_injection_guard(
         tool_use_id=tool_call.tool_use_id,
         agent_id=effective_ctx.agent_id if effective_ctx else None,
         session_key=effective_ctx.session_key if effective_ctx else None,
+    )
+    record_safety_event(
+        SafetyEventType.INJECTION_BLOCKED,
+        session_id=(effective_ctx.session_key if effective_ctx else None) or "unknown",
+        reason=reason,
+        tool_name=tool_call.tool_name,
     )
     return _build_envelope_result(
         tool_call,

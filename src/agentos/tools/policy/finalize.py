@@ -25,6 +25,7 @@ from agentos.execution_status import (
     mark_execution_status_truncated,
     normalize_execution_status,
 )
+from agentos.observability.safety_log import SafetyEventType, record_safety_event
 from agentos.plan_mode import exit_plan_payload_terminates_turn
 from agentos.result_budget import (
     ToolResultBudgetTracker,
@@ -249,6 +250,14 @@ async def finalize(
     status_is_error = derive_is_error(execution_status) if execution_status else False
     is_error = denial or status_is_error
 
+    if denial:
+        record_safety_event(
+            SafetyEventType.REFUSED_TOOL,
+            session_id=(ctx.session_key if ctx else None) or "unknown",
+            reason=_denial_reason(result),
+            tool_name=call.tool_name,
+        )
+
     artifacts = list(ctx.published_artifacts[artifact_start:]) if ctx is not None else []
     if artifacts:
         content = result
@@ -264,8 +273,15 @@ async def finalize(
             is_error=is_error,
         )
         content = budgeted.content
-        if budgeted.changed and execution_status is not None:
-            execution_status = mark_execution_status_truncated(execution_status)
+        if budgeted.changed:
+            if execution_status is not None:
+                execution_status = mark_execution_status_truncated(execution_status)
+            record_safety_event(
+                SafetyEventType.TRUNCATED_OUTPUT,
+                session_id=(ctx.session_key if ctx else None) or "unknown",
+                reason=f"result_budget_class={budget_class}",
+                tool_name=call.tool_name,
+            )
     return ToolResult(
         tool_use_id=call.tool_use_id,
         tool_name=call.tool_name,

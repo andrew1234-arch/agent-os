@@ -14,7 +14,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
+import structlog
+
 from agentos.paths import default_agentos_home
+
+log = structlog.get_logger(__name__)
 
 
 class SafetyEventType(StrEnum):
@@ -58,3 +62,34 @@ def write_safety_event(
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
     return path
+
+
+def record_safety_event(
+    event_type: SafetyEventType,
+    *,
+    session_id: str,
+    reason: str,
+    tool_name: str | None = None,
+    log_dir: Path | None = None,
+) -> None:
+    """Best-effort convenience wrapper around :func:`write_safety_event`.
+
+    Safety-event logging observes a tool call; it must never be the reason
+    that call fails. Mirrors the same never-break-the-turn guarantee
+    ``observability.metrics.record_metric`` and
+    ``observability.turn_call_log.TurnCallLogger.write`` already give their
+    own callers on the same dispatch hot path.
+    """
+    try:
+        write_safety_event(
+            SafetyEvent(
+                event_type=event_type,
+                session_id=session_id,
+                reason=reason,
+                ts=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                tool_name=tool_name,
+            ),
+            log_dir,
+        )
+    except Exception as exc:  # pragma: no cover - observability must not break turns
+        log.debug("safety_log.record_error", event_type=str(event_type), error=str(exc))
