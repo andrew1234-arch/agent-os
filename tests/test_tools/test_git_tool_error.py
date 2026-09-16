@@ -55,6 +55,13 @@ def repo_with_clean_tree(tmp_path: Path) -> Iterator[Path]:
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
+    # Local repo config, not just the env vars ``_git`` passes for its own
+    # invocations: the ``git.git_commit`` call below runs through the ambient
+    # environment (no sandbox), which has no git identity configured on a
+    # bare CI runner, so without this it fails on "Author identity unknown"
+    # before ever reaching the clean-tree check this test is about.
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "user.email", "t@example.com")
     (repo / "tracked.txt").write_text("one\n", encoding="utf-8", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "init")
