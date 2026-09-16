@@ -967,3 +967,125 @@ def test_provider_request_proof_final_hard_cap_preserves_long_status_after_paylo
     assert parsed["execution_status"]["stderr"] == (
         "cannot open /etc/shadow: Permission denied (os error 13)"
     )
+
+
+@pytest.mark.parametrize("stderr_chars", [1_000, 5_000])
+def test_provider_request_proof_final_hard_cap_bounds_a_long_stderr(stderr_chars: int) -> None:
+    """andreapn's second review on #2368: the first fix over-corrected.
+
+    Keeping every diagnostic key completely verbatim (not just the small
+    scalar fields) meant a long ``stderr`` -- exactly the shape a failing
+    shell tool produces -- could itself blow this tier's own budget, turning
+    a *working* request (main's clean digest) into
+    ``ProviderRequestBudgetExceededError``. ``status``/``reason`` must stay
+    exact regardless of how long ``stderr`` is, and the request must still
+    be produced.
+    """
+    critical_tool_result = json.dumps(
+        {
+            "output": "y" * 3000,
+            "execution_status": {
+                "status": "error",
+                "reason": "permission_denied",
+                "stderr": "e" * stderr_chars,
+            },
+        },
+        ensure_ascii=False,
+    )
+    payload = {
+        "messages": [
+            {"role": "user", "content": "old context\n" + ("u" * 8000)},
+            {"role": "assistant", "content": "old answer\n" + ("a" * 8000)},
+            {"role": "user", "content": "run the failing tool"},
+            {
+                "role": "assistant",
+                "content": "calling tool",
+                "tool_calls": [
+                    {
+                        "id": "call-critical",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": json.dumps({"cmd": "x" * 5000}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-critical",
+                "content": critical_tool_result,
+            },
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=2_200,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    assert proof["fits"] is True
+    assert proof["final_hard_cap_compacted"] is True
+    tool_content = compacted["messages"][4]["content"]
+    parsed = json.loads(tool_content)
+    assert parsed["execution_status"]["status"] == "error"
+    assert parsed["execution_status"]["reason"] == "permission_denied"
+    assert len(parsed["execution_status"]["stderr"]) < stderr_chars
+
+
+def test_provider_request_proof_final_hard_cap_bounds_non_diagnostic_nested_blob() -> None:
+    """A non-diagnostic nested value can blow the budget exactly like a bare
+    long string can -- it must be hard-compacted, not passed through
+    untouched, while the diagnostic fields alongside it stay intact.
+    """
+    critical_tool_result = json.dumps(
+        {
+            "data": {"blob": "z" * 50_000},
+            "execution_status": {"status": "error", "reason": "oops"},
+        },
+        ensure_ascii=False,
+    )
+    payload = {
+        "messages": [
+            {"role": "user", "content": "old context\n" + ("u" * 8000)},
+            {"role": "assistant", "content": "old answer\n" + ("a" * 8000)},
+            {"role": "user", "content": "run the failing tool"},
+            {
+                "role": "assistant",
+                "content": "calling tool",
+                "tool_calls": [
+                    {
+                        "id": "call-critical",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": json.dumps({"cmd": "x" * 5000}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-critical",
+                "content": critical_tool_result,
+            },
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=2_200,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    assert proof["fits"] is True
+    tool_content = compacted["messages"][4]["content"]
+    parsed = json.loads(tool_content)
+    assert parsed["execution_status"]["status"] == "error"
+    assert parsed["execution_status"]["reason"] == "oops"
+    assert len(json.dumps(parsed["data"])) < 200

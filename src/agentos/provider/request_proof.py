@@ -445,6 +445,46 @@ def _tool_content_is_critical(content: Any) -> bool:
 
 _CRITICAL_DIAGNOSTIC_KEYS = frozenset({"execution_status", "is_error", "error"})
 
+#: Below this many characters, a JSON-serialized non-string value is left as
+#: it is rather than replaced by a hard-compact marker -- the marker itself
+#: costs more space than a genuinely small value, so compacting it would be
+#: pure overhead, not a bound.
+_NON_STRING_VALUE_VERBATIM_MAX_CHARS = 96
+
+
+def _bounded_diagnostic_value(value: Any, *, label: str) -> Any:
+    """Bound a diagnostic field's value without dropping its small scalars.
+
+    A diagnostic key's value is not always a short string: ``execution_status``
+    is a dict whose own fields can include a tool's ``stderr``, and ``error``
+    can itself be an arbitrarily long message. Recursing through dicts/lists
+    and emergency-compacting only the string leaves keeps genuinely small
+    fields (``status``, ``reason``, ``exit_code``, ...) untouched -- they
+    never exceed ``_emergency_compact_string``'s own no-op threshold -- while
+    bounding anything that could otherwise blow the hard-cap tier's own
+    budget (#2368 review: an unbounded ``stderr`` regressed a *working*
+    request into ``ProviderRequestBudgetExceededError``).
+    """
+    if isinstance(value, str):
+        return _emergency_compact_string(value, label=label)
+    if isinstance(value, dict):
+        return {k: _bounded_diagnostic_value(v, label=f"{label}_{k}") for k, v in value.items()}
+    if isinstance(value, list):
+        return [_bounded_diagnostic_value(v, label=f"{label}_item") for v in value]
+    return value
+
+
+def _hard_compact_non_diagnostic_value(value: Any, *, label: str) -> Any:
+    """Hard-compact a non-diagnostic field's non-string value instead of
+    passing it through untouched -- a nested dict/list carrying a large
+    string (e.g. ``{"data": {"blob": "z"*50000}}``) is exactly as capable of
+    blowing the budget as a bare long string is.
+    """
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) <= _NON_STRING_VALUE_VERBATIM_MAX_CHARS:
+        return value
+    return _hard_compact_string(serialized, label=label)
+
 
 def _critical_tool_string_for_provider(text: str) -> str:
     """Hard-cap ``text`` while keeping genuine-failure diagnostics verbatim.
@@ -458,11 +498,16 @@ def _critical_tool_string_for_provider(text: str) -> str:
     avoid (#2363).
 
     When ``text`` parses as a JSON object carrying a failing
-    ``execution_status`` (or ``is_error``), every diagnostic key is kept as-is
-    and every other string field is hard-capped individually, so the result
-    stays small without risking the one thing that made this message
-    "critical" in the first place. Anything that doesn't parse that way falls
-    back to the prior whole-string emergency-compaction.
+    ``execution_status`` (or ``is_error``), every diagnostic key is kept but
+    bounded via :func:`_bounded_diagnostic_value` -- not passed through
+    verbatim, which would let an unbounded field inside it (a long
+    ``stderr``, a long ``error`` message) blow this tier's own budget. Every
+    other field is hard-capped individually (strings via
+    :func:`_emergency_compact_string`, everything else via
+    :func:`_hard_compact_non_diagnostic_value`), so the result stays small
+    without risking the one thing that made this message "critical" in the
+    first place. Anything that doesn't parse that way falls back to the
+    prior whole-string emergency-compaction.
     """
     with contextlib.suppress(json.JSONDecodeError):
         parsed = json.loads(text)
@@ -472,14 +517,13 @@ def _critical_tool_string_for_provider(text: str) -> str:
         ):
             preserved: dict[str, Any] = {}
             for key, value in parsed.items():
+                label = f"critical_field_{key}"
                 if key in _CRITICAL_DIAGNOSTIC_KEYS:
-                    preserved[key] = value
+                    preserved[key] = _bounded_diagnostic_value(value, label=label)
                 elif isinstance(value, str):
-                    preserved[key] = _emergency_compact_string(
-                        value, label=f"critical_field_{key}"
-                    )
+                    preserved[key] = _emergency_compact_string(value, label=label)
                 else:
-                    preserved[key] = value
+                    preserved[key] = _hard_compact_non_diagnostic_value(value, label=label)
             return json.dumps(preserved, ensure_ascii=False, separators=(",", ":"))
     return _emergency_compact_string(text, label="tool_result")
 
