@@ -232,3 +232,52 @@ def test_retention_never_undercuts_the_approval_lifespan(tmp_path) -> None:
     queue.consume(approval_id)
     assert queue.get(approval_id).consumed is True
     queue.close()
+
+
+def test_late_resolved_approval_survives_sweep_for_consumption(tmp_path) -> None:
+    # Issue #2487: an approval created hours ago but resolved now must not be
+    # pruned by sweep before it is consumed. Resolution resets created_at, so
+    # the retention window counts from resolution instead of creation.
+    queue = ApprovalQueue(
+        default_timeout=7200.0,
+        db_path=str(tmp_path / "aq.sqlite"),
+        resolved_retention=3600.0,
+    )
+    approval_id = queue.request("exec", {"toolName": "exec_command"})
+    # Created 2 hours ago (within the 7200s timeout, but older than the
+    # 3600s retention window) -- the exact shape from the issue's repro.
+    _backdate(queue, approval_id, seconds=7000.0)
+
+    queue.resolve(approval_id, True)
+
+    # Subsequent sweep must not delete the newly resolved, unconsumed approval.
+    queue.list_pending()
+
+    queue.consume(approval_id)
+    assert queue.get(approval_id).consumed is True
+    queue.close()
+
+
+def test_approved_but_never_consumed_row_is_still_eventually_pruned(tmp_path) -> None:
+    # A fix for #2487 must not trade the crash bug for unbounded growth: an
+    # approval that is approved but whose consumer never calls consume() (it
+    # crashed, or gave up) has to be pruned once resolved_retention has
+    # elapsed since *resolution* -- it cannot be exempted from sweep forever
+    # just because it was approved and not yet consumed.
+    queue = ApprovalQueue(
+        default_timeout=300.0,
+        db_path=str(tmp_path / "aq.sqlite"),
+        resolved_retention=3600.0,
+    )
+    approval_id = queue.request("exec", {"toolName": "exec_command"})
+    queue.resolve(approval_id, True)
+    # Simulate resolved_retention having elapsed since resolution, with the
+    # row never consumed.
+    _backdate(queue, approval_id, seconds=7200.0)
+
+    queue.list_pending()
+
+    with pytest.raises(KeyError):
+        queue.get(approval_id)
+    assert _row_count(queue) == 0
+    queue.close()

@@ -351,11 +351,16 @@ class ApprovalQueue:
         params = dict(entry.params)
         if approved and elevated_mode in VALID_ELEVATED_MODES:
             params["elevatedMode"] = elevated_mode
+        # Anchor the retention window to resolution, not creation: a prompt
+        # left pending near its lifespan limit before a human resolves it
+        # must not already look old enough to prune on the very next sweep
+        # (issue #2487).
+        now = time.time()
         cursor = self._conn.execute(
             "UPDATE approval_queue "
-            "SET resolved = 1, approved = ?, params = ? "
+            "SET resolved = 1, approved = ?, params = ?, created_at = ? "
             "WHERE approval_id = ? AND resolved = 0",
-            (1 if approved else 0, self._serialize_params(params), approval_id),
+            (1 if approved else 0, self._serialize_params(params), now, approval_id),
         )
         if cursor.rowcount != 1:
             self._conn.rollback()
@@ -371,6 +376,7 @@ class ApprovalQueue:
         entry = self.get(approval_id)
         entry.approved = bool(approved)
         entry.resolved = True
+        entry.created_at = now
         entry._event.set()
         self._pending[approval_id] = entry
 
