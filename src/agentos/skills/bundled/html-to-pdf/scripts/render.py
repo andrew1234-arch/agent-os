@@ -1,4 +1,4 @@
-"""Render HTML (file or URL) to PDF via WeasyPrint."""
+"""Render HTML (local file path or http(s) URL) to PDF via WeasyPrint."""
 
 from __future__ import annotations
 
@@ -16,8 +16,19 @@ PAGE_SIZES = {
 
 
 def _is_url(spec: str) -> bool:
+    """Return True only for an http(s) URL.
+
+    ``file`` is deliberately excluded: WeasyPrint's ``HTML(url=...)`` fetcher
+    speaks ``file://`` natively, so treating it as a URL bypasses the local
+    path branch's own ``html_path.is_file()`` check below and turns the
+    ``--html`` argument into an arbitrary local-file reader
+    (``file:///etc/passwd``). A local file must always go through the path
+    branch, matching the same scheme allowlist already used for untrusted
+    URLs elsewhere in this codebase (see
+    ``skills/bundled/cron-watchers/scripts/_url.py:require_http_url``).
+    """
     parsed = urlparse(spec)
-    return parsed.scheme in {"http", "https", "file"}
+    return parsed.scheme in {"http", "https"}
 
 
 def render(html_spec: str, out_path: Path, page_size: str | None) -> None:

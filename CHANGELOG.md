@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Skills (`html-to-pdf`): `render.py`'s `_is_url` treated `file` as an
+  allowed URL scheme, so `--html file:///etc/passwd` skipped the local-path
+  branch's `html_path.is_file()` check entirely and let WeasyPrint's own
+  fetcher read an arbitrary local file straight into the output PDF. Only
+  `http`/`https` are now accepted as URLs; a `file://` (or any other)
+  scheme now falls through to the path branch, where it correctly fails as
+  "not found" instead of being fetched
+  (#2479).
+
 ## [2026.9.16] - 2026-09-16
 
 ### Fixed

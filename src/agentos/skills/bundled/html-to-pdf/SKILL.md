@@ -82,10 +82,11 @@ appropriate only when the user explicitly asks for code.
 {python} {baseDir}/scripts/render.py --html invoice.html --out invoice.pdf --page-size A4
 ```
 
-The script accepts a local file path, a `file://` URL, or an `http(s)://`
-URL. CSS is loaded relative to the HTML location for local paths; for
-URLs, the same fetch rules apply (network resources are loaded with
-WeasyPrint's default fetcher).
+The script accepts a local file path or an `http(s)://` URL -- not a
+`file://` URL, which is rejected to avoid making `--html` an arbitrary
+local-file reader. CSS is loaded relative to the HTML location for local
+paths; for URLs, the same fetch rules apply (network resources are loaded
+with WeasyPrint's default fetcher).
 
 ## CSS Paged Media support
 

@@ -46,16 +46,69 @@ def test_eligibility_with_python(monkeypatch: pytest.MonkeyPatch) -> None:
     assert check_eligibility(spec, EligibilityContext.auto())
 
 
-def test_render_html_to_pdf(tmp_path: Path) -> None:
-    pytest.importorskip(
-        "weasyprint",
-        reason="weasyprint is opt-in via use-agent-os[document-extras]; skip when absent",
-    )
+def _import_render() -> object:
     sys.path.insert(0, str(SCRIPTS))
     try:
         import render  # type: ignore[import-not-found]
     finally:
         sys.path.pop(0)
+    return render
+
+
+def test_is_url_rejects_file_scheme() -> None:
+    """Fails without the fix: file:// was treated as a URL, so it bypassed
+    the local-path branch's own html_path.is_file() check and let WeasyPrint
+    read an arbitrary local file specified via --html."""
+    render = _import_render()
+
+    assert render._is_url("file:///etc/passwd") is False
+    assert render._is_url("FILE:///etc/passwd") is False
+    assert render._is_url("file:/etc/passwd") is False
+
+
+def test_is_url_still_accepts_http_and_https() -> None:
+    """Guard: the fix must not overshoot and reject the legitimate URL case."""
+    render = _import_render()
+
+    assert render._is_url("http://example.com/report.html") is True
+    assert render._is_url("https://example.com/report.html") is True
+
+
+def test_is_url_rejects_plain_local_paths() -> None:
+    """Guard: a bare path is not mistaken for a URL either way."""
+    render = _import_render()
+
+    assert render._is_url("report.html") is False
+    assert render._is_url("/workspace/report.html") is False
+
+
+def test_render_refuses_file_scheme_pointed_at_a_real_local_file(tmp_path: Path) -> None:
+    """Real-artifact test: a file:// URL pointed at a file that genuinely
+    exists must still be refused end-to-end through render(), not just at
+    the _is_url() unit -- and no PDF is written from its contents."""
+    pytest.importorskip(
+        "weasyprint",
+        reason="weasyprint is opt-in via use-agent-os[document-extras]; skip when absent",
+    )
+    render = _import_render()
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("super-secret-local-contents", encoding="utf-8")
+    out_path = tmp_path / "out.pdf"
+
+    with pytest.raises(SystemExit) as exc_info:
+        render.render(f"file://{secret}", out_path, None)
+
+    assert exc_info.value.code == 2
+    assert not out_path.exists()
+
+
+def test_render_html_to_pdf(tmp_path: Path) -> None:
+    pytest.importorskip(
+        "weasyprint",
+        reason="weasyprint is opt-in via use-agent-os[document-extras]; skip when absent",
+    )
+    render = _import_render()
 
     html_path = tmp_path / "doc.html"
     html_path.write_text(
