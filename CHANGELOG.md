@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `git_status`/`git_diff`/`git_commit`/`git_log`: `_run_git` raised a bare
+  `RuntimeError` on a nonzero git exit, unlike every sibling builtin tool
+  module, which raises `agentos.tools.types.ToolError` for an expected
+  tool-execution failure -- a caller that follows that convention would not
+  catch it. A `workdir` that does not exist raised an entirely unwrapped
+  `FileNotFoundError` from the subprocess launch itself, before either
+  `RuntimeError` site was ever reached. Both now raise `ToolError`
+  (#2480).
+
 ## [2026.9.16] - 2026-09-16
 
 ### Fixed

@@ -18,6 +18,7 @@ import pytest
 
 from agentos.redact import redact_sensitive_text
 from agentos.tools.builtin import git
+from agentos.tools.types import ToolError
 
 VENDOR_KEY = "sk-ant-api03-" + "A" * 40
 NAMED_SECRET = "supersecretvalue123abc"
@@ -166,7 +167,7 @@ async def test_git_failure_message_masks_credentials(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(ToolError) as excinfo:
         await git._run_git("status", cwd=str(tmp_path))
 
     assert NAMED_SECRET not in str(excinfo.value)

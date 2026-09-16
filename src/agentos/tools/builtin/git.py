@@ -12,7 +12,7 @@ from agentos.sandbox.integration import get_runtime, run_under_backend, sandboxe
 from agentos.sandbox.policy import build_policy, select_level
 from agentos.tools.path_policy import reject_foreign_host_path
 from agentos.tools.registry import tool
-from agentos.tools.types import current_tool_context
+from agentos.tools.types import ToolError, current_tool_context
 
 
 def _effective_workdir(workdir: str | None) -> str | None:
@@ -97,19 +97,26 @@ async def _run_git(*args: str, cwd: str | None = None) -> str:
         )
         output = _redact_git_output(result.stdout + result.stderr)
         if result.returncode != 0:
-            raise RuntimeError(f"git {' '.join(args)} failed (exit {result.returncode}):\n{output}")
+            raise ToolError(f"git {' '.join(args)} failed (exit {result.returncode}):\n{output}")
         return output
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd=cwd,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+        )
+    except OSError as exc:
+        # cwd does not exist (or isn't a directory), or the git binary itself
+        # could not be launched -- the OS raises before there is any
+        # returncode to check below, so this is a distinct failure surface
+        # from the two ToolError raises here, not reachable through them.
+        raise ToolError(f"git {' '.join(args)} could not be started: {exc}") from exc
     stdout, _ = await proc.communicate()
     output = _redact_git_output(stdout.decode("utf-8", errors="replace"))
     if proc.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed (exit {proc.returncode}):\n{output}")
+        raise ToolError(f"git {' '.join(args)} failed (exit {proc.returncode}):\n{output}")
     return output
 
 
@@ -153,7 +160,7 @@ async def _diff_revision(cwd: str | None) -> str | None:
     """
     try:
         await _run_git("rev-parse", "--verify", "--quiet", "HEAD", cwd=cwd)
-    except RuntimeError:
+    except ToolError:
         return None
     return "HEAD"
 
