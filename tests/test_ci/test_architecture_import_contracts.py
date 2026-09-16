@@ -163,6 +163,11 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("tools", "gateway"),
     ("tools", "identity"),
     ("tools", "memory"),
+    # tools/dispatch.py and tools/policy/finalize.py record REFUSED_TOOL /
+    # TRUNCATED_OUTPUT / INJECTION_BLOCKED safety events via
+    # observability.safety_log.record_safety_event() -- observability has no
+    # edge back into tools, so this is a leaf dependency, not a cycle (#2385).
+    ("tools", "observability"),
     ("tools", "provider"),
     ("tools", "safety"),
     ("tools", "sandbox"),
