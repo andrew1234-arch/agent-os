@@ -17,6 +17,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `artifact_delivery_key` (channel file delivery) keyed on `sha256` alone,
+  so two artifacts with different names but matching bytes -- two empty
+  CSVs, a template rendered per region, two placeholder images -- collapsed
+  into one and the second was silently dropped before delivery, with no
+  log line and no text-fallback mention. Delivery identity is now
+  `(name, content)`: different names with matching content are two
+  deliveries, and the same name with the same content is still one
+  ([#2133](https://github.com/use-agent-os/agent-os/issues/2133)).
 - `read_spreadsheet`: a phonetic guide (furigana) stored alongside an xlsx
   cell's text is no longer appended to the value. The shared-string reader took
   every `<t>` descendant, including the ones inside `<rPh>`, so a Japanese

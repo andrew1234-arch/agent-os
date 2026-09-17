@@ -29,18 +29,42 @@ _LOOSE_IMAGE_LINE_RE = re.compile(r"^\s*(?:image|file)\s*:\s*(?P<target>\S+)\s*$
 
 
 def artifact_delivery_key(artifact: dict[str, Any]) -> str:
+    """Stable identity for one artifact on the channel delivery path.
+
+    Delivery identity is ``(name, content)``: two artifacts with different
+    names are two deliveries even when their bytes match -- two empty
+    CSVs, a template rendered per region, two placeholder images -- and
+    two artifacts with the same name and the same bytes are one delivery
+    (#2133).
+
+    ``id`` is deliberately checked last, not first: ``ArtifactStore.
+    publish_bytes()`` mints a fresh random id on every call regardless of
+    content -- it never looks up an existing ref -- so every artifact the
+    store ever produces carries a unique id. Preferring id would make the
+    content+name check below unreachable for any real artifact and
+    silently reintroduce duplicate delivery for identical republished
+    content, exactly the regression this key exists to prevent (see
+    ``test_channel_file_delivery_dedupes_same_artifact_material``, which
+    publishes the same bytes under the same name from two different
+    sources and expects exactly one delivery).
+    """
+    name = artifact.get("name")
+    name_suffix = f"|name:{name}" if isinstance(name, str) and name else ""
     for field in (
         "sha256",
         "path",
         "channel_download_url",
         "signed_download_url",
         "download_url",
-        "id",
-        "name",
     ):
         value = artifact.get(field)
         if value:
-            return f"{field}:{value}"
+            return f"{field}:{value}{name_suffix}"
+    if name_suffix:
+        return f"name:{name}"
+    value = artifact.get("id")
+    if isinstance(value, str) and value:
+        return f"id:{value}"
     return ""
 
 
