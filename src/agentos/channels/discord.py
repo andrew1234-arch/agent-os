@@ -1380,9 +1380,21 @@ class DiscordChannel:
         return self.bot_user_id in self.extract_mentions(text)
 
     def is_group_mentioned(self, msg: IncomingMessage) -> bool:
-        """Uniform mention check for group gating. Delegates to is_mentioned."""
+        """Uniform mention check for group gating. Delegates to is_mentioned.
+
+        A reaction (``MESSAGE_REACTION_ADD``) carries no text of its own --
+        ``content`` is always ``""`` -- so ``is_mentioned("")`` is
+        unconditionally ``False`` and every reaction in a guild channel or
+        thread would otherwise be dropped by the group-mention gate, even
+        one added to a message the bot itself just sent. Reacting to that
+        specific message is already as targeted as an @mention, so it's
+        treated the same way here rather than exempting reactions outright.
+        """
         if msg.metadata.get("interaction_type") == "slash_command":
             return True
+        if msg.metadata.get("event_type") == "MESSAGE_REACTION_ADD":
+            message_id = msg.metadata.get("native_message_id")
+            return bool(message_id) and message_id in self._sent_messages
         return self.is_mentioned(msg.content)
 
     # ------------------------------------------------------------------
