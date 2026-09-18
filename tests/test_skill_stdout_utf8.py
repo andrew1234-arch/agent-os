@@ -322,3 +322,28 @@ def test_rwa_lookup_result_echoes_the_query_as_utf8(monkeypatch: pytest.MonkeyPa
     with CodePageStdout() as code_page_stdout:
         assert rwa_lookup.main() == 0
     assert code_page_stdout.payload()["query"] == NON_ASCII
+
+
+# ── weather ─────────────────────────────────────────────────────────────────
+
+
+def test_weather_fetch_result_emits_non_ascii_location_as_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    weather_fetch = _load("weather/scripts/weather_fetch.py", "weather_fetch")
+
+    monkeypatch.setattr(
+        weather_fetch,
+        "_fetch_wttr_json",
+        lambda *_a, **_k: {
+            "current_condition": [{"weatherDesc": [{"value": NON_ASCII}], "temp_C": "20"}],
+            "weather": [],
+        },
+    )
+    _argv(monkeypatch, "weather_fetch.py", "--location", NON_ASCII)
+
+    with CodePageStdout() as code_page_stdout:
+        assert weather_fetch.main() == 0
+    payload = code_page_stdout.payload()
+    assert payload["location"] == NON_ASCII
+    assert payload["current"]["condition"] == NON_ASCII
