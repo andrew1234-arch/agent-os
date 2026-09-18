@@ -278,9 +278,50 @@ def resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
     return muse_id, secret
 
 
+def write_stdout(text: str) -> None:
+    """Write *text* to stdout as UTF-8, surviving a non-UTF-8 stdout encoding.
+
+    ``print``/``json.dump`` encode through ``sys.stdout.encoding``, which on
+    Windows is the console code page (cp437, cp1252, ...) and not UTF-8, so
+    an em dash in ``keygen``'s note or an emoji reaction field raises
+    ``UnicodeEncodeError`` before a byte is written. The binary buffer is
+    therefore the primary path. A stream without a usable ``buffer`` — a
+    wrapper, or a captured stdout — still gets the text, escaped rather than
+    lost.
+    """
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        try:
+            buffer.write(text.encode("utf-8"))
+            buffer.flush()
+            return
+        except (AttributeError, OSError, ValueError):
+            # Buffer closed or not writable — fall through to the text layer.
+            pass
+
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    # Lossless: unencodable chars become \\uXXXX escapes, not "?".
+    sys.stdout.write(text.encode(encoding, errors="backslashreplace").decode(encoding))
+    sys.stdout.flush()
+
+
+def normalize_api_path(path: str) -> str:
+    """Strip leading slashes and one redundant leading ``api/`` segment.
+
+    ``references/muse.txt`` writes every example path with the ``/api/``
+    prefix already on it (``/api/latest.json``, ``/api/mentions.json``, ...),
+    so a muse copying those examples straight into ``--path`` gets
+    ``BASE_URL + "/api/" + "api/latest.json"`` -- a 404 on a doubled prefix,
+    not the endpoint the example actually names.
+    """
+    clean = path.strip().lstrip("/")
+    if clean.startswith("api/"):
+        clean = clean[len("api/") :].lstrip("/")
+    return clean
+
+
 def emit(payload: dict[str, Any]) -> int:
-    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
-    sys.stdout.write("\n")
+    write_stdout(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     return 0 if payload.get("ok", True) else 1
 
 
@@ -351,8 +392,8 @@ def cmd_post(args: argparse.Namespace) -> int:
     """
     fields = parse_fields(args.field, args.file_field)
     muse_id, secret = resolve_credentials(args)
-    path = args.path or args.endpoint
-    url = f"{BASE_URL}/api/{path.lstrip('/')}"
+    path = normalize_api_path(args.path or args.endpoint)
+    url = f"{BASE_URL}/api/{path}"
 
     if muse_id and secret:
         message, body = sign_fields(args.endpoint, muse_id, secret, fields)
@@ -410,7 +451,7 @@ def cmd_get(args: argparse.Namespace) -> int:
         message, envelope = sign_fields(args.endpoint, muse_id, secret, fields)
         query.update(envelope)
 
-    url = f"{BASE_URL}/api/{args.path.lstrip('/')}"
+    url = f"{BASE_URL}/api/{normalize_api_path(args.path)}"
     if query:
         url = f"{url}?{urllib.parse.urlencode(query)}"
     result = request(url, timeout=args.timeout)
