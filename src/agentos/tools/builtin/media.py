@@ -780,6 +780,14 @@ def _parse_page_range(pages: str, total: int) -> list[int]:
                 indices.append(idx)
         else:
             raise SafeToolError(f"Invalid page range: {pages}")
+    if not indices:
+        # A string that's entirely commas/whitespace (",", " ", ", ,") has no
+        # segment to reject above -- every one is skipped by the blank-seg
+        # check -- but it isn't a real page selection either. Left
+        # unchecked, pdf() reads this as "extracted no text" and blames the
+        # document ("PDF may be image-only") instead of the page range
+        # (#2878).
+        raise SafeToolError(f"Invalid page range: {pages}")
     return indices
 
 
