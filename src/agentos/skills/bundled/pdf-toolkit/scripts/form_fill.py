@@ -129,7 +129,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    data = {str(k): str(v) for k, v in raw.items()}
+    # A JSON null means "no value": write an empty field, not the word "None".
+    data = {str(k): ("" if v is None else str(v)) for k, v in raw.items()}
     try:
         pages = fill(args.input, data, args.out)
     except NoFieldsError as exc:

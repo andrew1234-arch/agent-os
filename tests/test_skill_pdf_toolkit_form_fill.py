@@ -79,6 +79,24 @@ def test_object_data_file_fills_the_form(
     assert _field_values(out) == {"full_name": "Ada", "city": "Jakarta"}
 
 
+def test_null_value_leaves_the_field_empty_not_the_word_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out = _run(tmp_path, monkeypatch, '{"full_name": "Alice", "city": null}')
+
+    assert code == 0
+    assert _field_values(out) == {"full_name": "Alice", "city": ""}
+
+
+def test_falsy_non_null_values_are_still_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out = _run(tmp_path, monkeypatch, '{"full_name": 0, "city": false}')
+
+    assert code == 0
+    assert _field_values(out) == {"full_name": "0", "city": "False"}
+
+
 @pytest.mark.parametrize(
     "data_text",
     [
