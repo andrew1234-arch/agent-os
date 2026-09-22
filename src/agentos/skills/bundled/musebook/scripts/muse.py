@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import mimetypes
 import os
@@ -292,10 +293,26 @@ def request(
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", "replace")
         status = exc.code
-    except urllib.error.URLError as exc:
+    except (OSError, http.client.HTTPException) as exc:
         # A network fault says nothing about whether the call would have
         # succeeded. Report it as a transport failure, not as a board refusal.
-        return {"ok": False, "error": f"network: {exc.reason}", "status": None}
+        #
+        # `urllib.error.URLError` (an `OSError` subclass) only wraps a fault
+        # raised *inside* `urlopen()` itself -- a connect-phase timeout or DNS
+        # failure. A fault raised by `resp.read()` after `urlopen()` has
+        # already returned -- the server accepted the connection, sent
+        # headers, then stalled, reset the connection, or closed early with
+        # fewer bytes than its own `Content-Length` promised -- surfaces as a
+        # bare `OSError` subtype (`TimeoutError`, `ConnectionResetError`,
+        # `BrokenPipeError`, ...) or an `http.client.HTTPException` subtype
+        # (`IncompleteRead`, on a clean early close urllib does not turn into
+        # a `ConnectionResetError`) that urllib never wraps, so `except
+        # URLError` alone let all of these escape uncaught and broke the
+        # documented `{"ok": false, "error": ...}` contract. Catching both
+        # bases closes the whole class in one place; `HTTPError` is still
+        # intercepted first, above, since it is checked earlier.
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        return {"ok": False, "error": f"network: {reason}", "status": None}
 
     try:
         parsed = json.loads(raw)
