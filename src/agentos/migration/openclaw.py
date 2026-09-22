@@ -325,9 +325,13 @@ def _provider_from_model(model: str) -> str | None:
         return "openai"
     if normalized.startswith("claude") or normalized.startswith("anthropic/"):
         return "anthropic"
-    if normalized.startswith("gemini"):
+    if normalized.startswith("gemini") or normalized.startswith("google/gemini"):
         return "gemini"
-    if normalized.startswith("zai/") or normalized.startswith("glm-"):
+    if (
+        normalized.startswith("zai/")
+        or normalized.startswith("zhipu/")
+        or normalized.startswith("glm-")
+    ):
         return "zhipu"
     if normalized.startswith("minimax") or normalized.startswith("minimax/"):
         return "minimax"
@@ -344,6 +348,14 @@ def _model_for_agentos_provider(model: str, provider: str | None) -> tuple[str, 
         native = model.split("/", 1)[1].strip()
         if native:
             return native, {"source_model": model, "normalized_provider_prefix": "zai"}
+    if provider == "zhipu" and model.lower().startswith("zhipu/"):
+        native = model.split("/", 1)[1].strip()
+        if native:
+            return native, {"source_model": model, "normalized_provider_prefix": "zhipu"}
+    if provider == "gemini" and model.lower().startswith("google/"):
+        native = model.split("/", 1)[1].strip()
+        if native:
+            return native, {"source_model": model, "normalized_provider_prefix": "google"}
     return model, {}
 
 

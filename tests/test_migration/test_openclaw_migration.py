@@ -6,7 +6,12 @@ from pathlib import Path
 
 from agentos.engine.context import load_context_files
 from agentos.env import parse_env_file
-from agentos.migration.openclaw import MigrationOptions, OpenClawMigrator
+from agentos.migration.openclaw import (
+    MigrationOptions,
+    OpenClawMigrator,
+    _model_for_agentos_provider,
+    _provider_from_model,
+)
 from agentos.provider.selector import build_provider
 from agentos.skills.loader import SkillLoader
 from agentos.skills.types import SkillLayer
@@ -562,6 +567,135 @@ def test_zai_and_glm_models_migrate_to_zhipu_provider(
     assert persisted["llm"]["api_key_env"] == "ZAI_API_KEY"
     assert persisted["llm"]["base_url"] == "https://zhipu.example.test/api/paas/v4"
     build_provider(persisted["llm"]["provider"], persisted["llm"]["model"])
+
+
+def test_provider_from_model_maps_google_and_zhipu_prefixes() -> None:
+    assert _provider_from_model("google/gemini-2.5-pro") == "gemini"
+    assert _provider_from_model("Google/Gemini-2.5-Flash-Lite") == "gemini"
+    assert _provider_from_model("gemini-2.5-pro") == "gemini"
+    assert _provider_from_model("zhipu/glm-4.5") == "zhipu"
+    assert _provider_from_model("zai/glm-4.5") == "zhipu"
+    assert _provider_from_model("glm-4.5") == "zhipu"
+    # google/gemma-* is a distinct model family and must keep falling back
+    # to openrouter rather than being mis-mapped onto the gemini provider.
+    assert _provider_from_model("google/gemma-3-27b-it") is None
+
+    native, details = _model_for_agentos_provider("google/gemini-2.5-pro", "gemini")
+    assert native == "gemini-2.5-pro"
+    assert details == {
+        "source_model": "google/gemini-2.5-pro",
+        "normalized_provider_prefix": "google",
+    }
+    native, details = _model_for_agentos_provider("zhipu/glm-4.5", "zhipu")
+    assert native == "glm-4.5"
+    assert details == {
+        "source_model": "zhipu/glm-4.5",
+        "normalized_provider_prefix": "zhipu",
+    }
+    # An openrouter-routed model that happens to reference google/gemini in
+    # its own slug must still resolve to the openrouter provider, unchanged.
+    native, details = _model_for_agentos_provider(
+        "openrouter/google/gemini-2.5-flash", "openrouter"
+    )
+    assert native == "google/gemini-2.5-flash"
+    assert details["normalized_provider_prefix"] == "openrouter"
+
+
+def test_google_gemini_prefixed_model_migrates_to_gemini_provider(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _make_source(tmp_path)
+    config = json.loads((source / "openclaw.json").read_text(encoding="utf-8"))
+    config["agents"]["defaults"]["model"] = "google/gemini-2.5-pro"
+    config["models"] = {
+        "providers": {
+            "gemini": {
+                "apiKey": "sk-gemini-secret",
+                "baseUrl": "https://gemini.example.test/v1",
+            }
+        }
+    }
+    (source / "openclaw.json").write_text(json.dumps(config), encoding="utf-8")
+    home = tmp_path / "agentos-home"
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("AGENTOS_STATE_DIR", str(home))
+
+    OpenClawMigrator(
+        MigrationOptions(
+            source=source,
+            config_path=config_path,
+            apply=True,
+            migrate_secrets=True,
+        )
+    ).migrate()
+
+    persisted = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["llm"]["provider"] == "gemini"
+    assert persisted["llm"]["model"] == "gemini-2.5-pro"
+    assert persisted["llm"]["api_key_env"] == "GEMINI_API_KEY"
+    assert persisted["llm"]["base_url"] == "https://gemini.example.test/v1"
+    build_provider(persisted["llm"]["provider"], persisted["llm"]["model"])
+
+
+def test_zhipu_prefixed_model_migrates_to_zhipu_provider(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _make_source(tmp_path)
+    config = json.loads((source / "openclaw.json").read_text(encoding="utf-8"))
+    config["agents"]["defaults"]["model"] = "zhipu/glm-4.6"
+    config["models"] = {
+        "providers": {
+            "zhipu": {
+                "apiKey": "sk-zhipu-secret",
+                "baseUrl": "https://zhipu.example.test/api/paas/v4",
+            }
+        }
+    }
+    (source / "openclaw.json").write_text(json.dumps(config), encoding="utf-8")
+    home = tmp_path / "agentos-home"
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("AGENTOS_STATE_DIR", str(home))
+
+    OpenClawMigrator(
+        MigrationOptions(
+            source=source,
+            config_path=config_path,
+            apply=True,
+            migrate_secrets=True,
+        )
+    ).migrate()
+
+    persisted = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["llm"]["provider"] == "zhipu"
+    assert persisted["llm"]["model"] == "glm-4.6"
+    assert persisted["llm"]["api_key_env"] == "ZAI_API_KEY"
+    assert persisted["llm"]["base_url"] == "https://zhipu.example.test/api/paas/v4"
+    build_provider(persisted["llm"]["provider"], persisted["llm"]["model"])
+
+
+def test_non_gemini_google_prefixed_model_is_left_unmapped(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _make_source(tmp_path)
+    config = json.loads((source / "openclaw.json").read_text(encoding="utf-8"))
+    config["agents"]["defaults"]["model"] = "google/palm-2"
+    (source / "openclaw.json").write_text(json.dumps(config), encoding="utf-8")
+    home = tmp_path / "agentos-home"
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("AGENTOS_STATE_DIR", str(home))
+
+    report = OpenClawMigrator(
+        MigrationOptions(source=source, config_path=config_path, apply=True)
+    ).migrate()
+
+    persisted = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["llm"]["provider"] == "openrouter"
+    assert persisted["llm"]["model"] == "google/palm-2"
+    item = next(item for item in report["items"] if item["kind"] == "model-config")
+    assert "unrecognized_provider" not in item["details"]
 
 
 def test_model_provider_conflict_with_existing_tier_profile_is_reported(
