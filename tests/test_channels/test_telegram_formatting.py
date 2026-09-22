@@ -657,3 +657,99 @@ def test_a_triple_marker_run_beside_a_bold_run() -> None:
 
     assert rendered == "<b><i>a</i></b> and <b>b</b>"
     assert _entities_are_properly_nested(rendered)
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        (r"literal \*not italic\* here", "literal *not italic* here"),
+        (r"a \_b\_ c", "a _b_ c"),
+        (r"\`not code\`", "`not code`"),
+    ],
+)
+def test_the_reported_escape_examples_are_consumed_not_printed(
+    markdown: str, expected: str
+) -> None:
+    """Issue #3305's own reproduction: the backslash must not reach the reader.
+
+    Before the fix, none of these three consumed the backslash *or* honoured
+    it: the reader got a stray ``\\`` in the text and the emphasis it was
+    meant to suppress applied anyway (``\\<i>not italic\\</i>``), and the
+    escaped backtick pair still opened a real ``<code>`` span.
+    """
+    assert render_telegram_html(markdown) == expected
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        (r"\*\*bold\*\*", "**bold**"),
+        (r"\~\~strike\~\~", "~~strike~~"),
+        (r"a \* b", "a * b"),
+        (r"\[x\](https://example.com)", "[x](https://example.com)"),
+    ],
+)
+def test_an_escaped_delimiter_cannot_open_any_inline_run(markdown: str, expected: str) -> None:
+    """Same rule as the reported cases, for the other delimiter families.
+
+    An escaped ``[`` must not open a link either -- the bracket is consumed
+    and stays literal, so the parenthesised text after it is never mistaken
+    for a destination.
+    """
+    assert render_telegram_html(markdown) == expected
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        (r"\<b\>not bold\</b\>", "&lt;b&gt;not bold&lt;/b&gt;"),
+        (r"a \& b", "a &amp; b"),
+    ],
+)
+def test_an_escaped_html_special_character_stays_escaped(markdown: str, expected: str) -> None:
+    """The consumed backslash must not hand `html.escape` a live `<` or `&`.
+
+    Escapes are parked ahead of `html.escape`, so what comes back out is the
+    restored character run back through `html.escape` on its own -- never a
+    literal tag or entity smuggled through the placeholder.
+    """
+    assert render_telegram_html(markdown) == expected
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        (r"\\*italic*", "\\<i>italic</i>"),
+        (r"\\`x`", "\\<code>x</code>"),
+        (r"\\", "\\"),
+    ],
+)
+def test_a_doubled_backslash_escapes_itself_not_the_next_character(
+    markdown: str, expected: str
+) -> None:
+    r"""Backslash is itself in CommonMark's escapable set.
+
+    ``\\*`` is a literal backslash followed by a *live* ``*`` -- the first
+    backslash escapes the second, so nothing is left to escape the asterisk.
+    """
+    assert render_telegram_html(markdown) == expected
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        (r"`a\*b`", "<code>a\\*b</code>"),
+        (r"`a\`b`", "<code>a\\</code>b`"),
+    ],
+)
+def test_a_backslash_inside_a_code_span_is_never_an_escape(markdown: str, expected: str) -> None:
+    r"""CommonMark: backslash escapes do not work inside code spans.
+
+    The content keeps its literal backslash. The second case is the
+    subtler rule this fix also has to get right: an *escaped* backtick still
+    closes a span a real, unescaped backtick opened (only the opening side
+    treats an escaped backtick as inert) -- so the span closes at the
+    escaped backtick, and the trailing backtick after it is left as a
+    literal character outside the tag.
+    """
+    assert render_telegram_html(markdown) == expected

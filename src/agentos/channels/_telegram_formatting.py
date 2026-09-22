@@ -68,13 +68,31 @@ def _find_closing_backtick_run(text: str, start: int, length: int) -> int:
     return -1
 
 
+def _backslash_run_length(text: str, index: int) -> int:
+    """Count the consecutive backslashes immediately before ``index``."""
+    count = 0
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] == "\\":
+        count += 1
+        cursor -= 1
+    return count
+
+
 def _replace_code_spans(text: str) -> tuple[str, list[str]]:
-    """Replace balanced Markdown code spans with private placeholders."""
+    r"""Replace balanced Markdown code spans with private placeholders.
+
+    A backtick preceded by an odd run of backslashes is escaped -- CommonMark
+    makes it a literal character, so it cannot *open* a span (`` \`not code\` ``
+    must not become a `<code>` tag). The closing side stays a raw scan on
+    purpose: the reference grammar still lets an escaped backtick close a span
+    that a real, unescaped backtick opened, so `` `a\`b` `` closes at the
+    escaped backtick and leaves the trailing one literal.
+    """
     chunks: list[str] = []
     output: list[str] = []
     cursor = 0
     while cursor < len(text):
-        if text[cursor] != "`":
+        if text[cursor] != "`" or _backslash_run_length(text, cursor) % 2 == 1:
             output.append(text[cursor])
             cursor += 1
             continue
@@ -176,6 +194,15 @@ _ITALIC_UNDERSCORE_RE = re.compile(r"(?<!\w)_(?=[^\s_])(.+?)(?<=[^\s_])_(?!\w)")
 _ITALIC_ASTERISK_RE = re.compile(r"(?<!\*)\*(?=\S)(.+?)(?<=\S)\*(?!\*)")
 
 
+#: CommonMark's escapable set: any ASCII punctuation character. A backslash
+#: before one of these is consumed and the punctuation becomes a literal
+#: character rather than a delimiter -- ``\*`` must not open italics and
+#: ``\[`` must not open a link. Backslash itself is in the set (0x5C sits in
+#: the ``[``-`` ` `` run), so a doubled backslash resolves to one literal
+#: backslash rather than escaping whatever follows it.
+_ESCAPED_PUNCTUATION_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+
 def _is_python_dunder(content: str) -> bool:
     return content in _DUNDER_NAMES
 
@@ -194,6 +221,21 @@ def _bold_underscore_strip(match: re.Match[str]) -> str:
 
 def _render_inline(text: str) -> str:
     protected, code_chunks = _replace_code_spans(text)
+    escaped_chars: list[str] = []
+
+    def _park_escape(match: re.Match[str]) -> str:
+        # Parked ahead of both the link/URL passes and the emphasis passes
+        # below, and ahead of `html.escape` too, so an escaped delimiter can
+        # neither open a link or a run nor smuggle a raw `<`/`&` through --
+        # it comes back at the very end as the plain, HTML-escaped character.
+        # Code spans are already gone by this point (replaced above), so a
+        # backslash inside one was never a candidate here: CommonMark leaves
+        # backslash escapes inert inside code spans, and this ordering gets
+        # that for free instead of needing a special case.
+        escaped_chars.append(match.group(1))
+        return f"\x00TG_ESC_{len(escaped_chars) - 1}\x00"
+
+    protected = _ESCAPED_PUNCTUATION_RE.sub(_park_escape, protected)
     rendered = html.escape(protected)
     hrefs: list[str] = []
     bare_urls: list[str] = []
@@ -245,6 +287,8 @@ def _render_inline(text: str) -> str:
         rendered = rendered.replace(f"\x00TG_URL_{index}\x00", url)
     for index, href in enumerate(hrefs):
         rendered = rendered.replace(f"\x00TG_HREF_{index}\x00", href)
+    for index, char in enumerate(escaped_chars):
+        rendered = rendered.replace(f"\x00TG_ESC_{index}\x00", html.escape(char))
     for index, chunk in enumerate(code_chunks):
         rendered = rendered.replace(f"\x00TG_CODE_{index}\x00", chunk)
     return rendered
